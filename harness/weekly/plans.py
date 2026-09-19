@@ -7,10 +7,19 @@ reported as what it is: **the best combination found within a bounded search**,
 never "the optimal week".
 
 The one thing this module refuses to do cheaply is trust the per-job travel
-figures it was handed. A candidate's travel was measured alone, from the day's
-own origin. The moment two jobs land on the same weekday, the second one starts
-from the first one's doorstep, so every leg on a shared day is recomputed from
-scratch in :func:`evaluate_combination`.
+figures it was handed. A candidate's travel was measured alone, from its slot's
+own origin. The moment two jobs land in the same free window, the second one
+starts from the first one's doorstep, so every leg in a shared window — the
+closing leg included — is recomputed from scratch in
+:func:`evaluate_combination`. The closing leg is bounded by the window's own
+end, not by midnight: a chain placed before a fixed schedule has to end at that
+schedule, on time.
+
+Ranking is arithmetic too. ``maxIncome`` and ``minTravel`` are pure single-axis
+orders. ``balanced`` leads on effective hourly wage, but when the caller asked
+for ``rating`` or ``flexibility`` that wage is nudged by a bounded, documented
+signal (:func:`balanced_score`) so the stated priority actually changes which
+week is shown, instead of only breaking exact float ties.
 """
 
 from __future__ import annotations
@@ -20,15 +29,17 @@ import itertools
 from typing import Any, Iterable, Sequence
 
 from .constants import (
+    BALANCED_PRIORITY_WEIGHT,
     CANDIDATE_POOL_PER_AXIS,
-    DAY_END_MINUTES,
     DAY_INDEX,
+    MAX_RATING,
     MAX_WEEKLY_WORK_HOURS,
     PLAN_TYPES,
     PRE_WORK_BUFFER_MINUTES,
     WEEKLY_HOLIDAY_MIN_HOURS,
     WEEKS_PER_MONTH,
 )
+from .slots import slot_key
 from .timeutil import format_hhmm
 from .travel import leg_minutes, transit_minutes
 
@@ -57,27 +68,27 @@ _PLAN_ID_SLUG: dict[str, str] = {
 # feasibility of a whole week
 
 
-def evaluate_combination(
-    combo: Sequence[dict[str, Any]],
-    *,
-    home: str,
-) -> dict[str, Any] | None:
+def evaluate_combination(combo: Sequence[dict[str, Any]]) -> dict[str, Any] | None:
     """Re-plan a set of candidates as one week, or return ``None``.
 
-    Rejects the combination when two shifts overlap, when the trip between two
-    shifts on the same day does not fit, when the user cannot get home inside
-    the planning day, or when the total exceeds
-    :data:`MAX_WEEKLY_WORK_HOURS`.
+    Work is grouped by *free window*, not by weekday, because a weekday with a
+    fixed schedule has two of them. Inside a window the shifts are chained:
+    each one starts from where the previous one left the user, and the chain
+    must close at the window's ``toLocation`` no later than its ``toMinutes``.
+
+    Rejects the combination when two shifts overlap, when a trip inside a
+    window does not fit, when the chain cannot reach the window's closing point
+    in time, or when the total exceeds :data:`MAX_WEEKLY_WORK_HOURS`.
     """
-    by_day: dict[str, list[tuple[dict[str, Any], dict[str, Any]]]] = {}
+    by_window: dict[tuple[str, int], list[tuple[dict[str, Any], dict[str, Any]]]] = {}
     for candidate in combo:
         for shift in candidate["assigned"]:
-            by_day.setdefault(shift["day"], []).append((candidate, shift))
+            by_window.setdefault(slot_key(shift["slot"]), []).append((candidate, shift))
 
     travel_by_shift: dict[tuple[str, str, int], dict[str, Any]] = {}
     total_travel = 0
 
-    for day, entries in by_day.items():
+    for (day, _opens), entries in by_window.items():
         entries.sort(key=lambda item: (item[1]["startMinutes"], item[0]["jobId"]))
         slot = entries[0][1]["slot"]
         origin, origin_walk = slot["fromLocation"], 0
@@ -85,8 +96,6 @@ def evaluate_combination(
 
         previous_end: int | None = None
         for candidate, shift in entries:
-            if shift["slot"]["fromMinutes"] != slot["fromMinutes"]:
-                return None  # two different free windows in one day: not modelled
             if previous_end is not None and shift["startMinutes"] < previous_end:
                 return None  # overlapping shifts
             if shift["endMinutes"] > slot["toMinutes"]:
@@ -119,10 +128,14 @@ def evaluate_combination(
             available_from = shift["endMinutes"]
             previous_end = shift["endMinutes"]
 
-        home_leg = leg_minutes(origin=origin, destination=home, origin_walk=origin_walk)
-        if available_from + home_leg > DAY_END_MINUTES:
-            return None  # no way home before the day ends
-        total_travel += home_leg
+        closing_leg = leg_minutes(
+            origin=origin, destination=slot["toLocation"], origin_walk=origin_walk
+        )
+        if available_from + closing_leg > slot["toMinutes"]:
+            # No way to reach the window's closing point — home by midnight for
+            # an end-of-day window, the fixed schedule for a morning one.
+            return None
+        total_travel += closing_leg
 
     work_minutes = sum(candidate["weeklyMinutes"] for candidate in combo)
     work_hours = work_minutes / 60.0
@@ -211,7 +224,6 @@ def enumerate_plans(
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Every feasible week inside the bounded pool, plus search bookkeeping."""
     job_count = request["search"]["jobCount"]
-    home = request["profile"]["home"]
     pinned_ids = request["regenerate"]["pinnedJobIds"]
     by_id = {c["jobId"]: c for c in candidates}
     pinned = [by_id[job_id] for job_id in pinned_ids if job_id in by_id]
@@ -224,7 +236,7 @@ def enumerate_plans(
     attempted = 0
     for extra in itertools.combinations(free, remaining):
         attempted += 1
-        outcome = evaluate_combination(list(pinned) + list(extra), home=home)
+        outcome = evaluate_combination(list(pinned) + list(extra))
         if outcome is not None:
             evaluated.append(outcome)
 
@@ -280,7 +292,7 @@ def _sort_key(plan_type: str, priority: str, want_holiday: bool):
         primary = {
             "maxIncome": -outcome["weeklyPay"],
             "minTravel": outcome["weeklyTravelMinutes"],
-            "balanced": -outcome["effectiveHourlyWage"],
+            "balanced": -balanced_score(outcome, priority),
         }[plan_type]
         holiday = 0 if (want_holiday and outcome["holidayThresholdJobIds"]) else 1
         return (
@@ -291,6 +303,62 @@ def _sort_key(plan_type: str, priority: str, want_holiday: bool):
         )
 
     return key
+
+
+def priority_signal(candidate: dict[str, Any], priority: str) -> float:
+    """How well one job serves ``rating``/``flexibility``, normalised to 0..1.
+
+    Deliberately crude and deliberately stated:
+
+    * ``rating`` — the posting's own star rating over :data:`MAX_RATING`. A
+      posting with no usable rating scores ``0``. An unknown is never credited
+      as if it were good, which is the same rule the rest of the pipeline
+      follows for facts it cannot check;
+    * ``flexibility`` — how many of the three negotiability flags the posting
+      sets (``negotiable``, ``daysNegotiable``, ``timeNegotiable``), over three.
+
+    ``wage`` and ``distance`` return ``0``: those priorities already lead the
+    response with a plan type built on exactly that axis (``maxIncome`` /
+    ``minTravel``), so nudging ``balanced`` the same way would just print the
+    same week twice.
+    """
+    job = candidate["job"]
+    if priority == "rating":
+        rating = job.get("rating")
+        if isinstance(rating, bool) or not isinstance(rating, (int, float)):
+            return 0.0
+        return max(0.0, min(1.0, float(rating) / MAX_RATING))
+    if priority == "flexibility":
+        flexibility = job.get("scheduleFlexibility") or {}
+        flags = (
+            bool(job.get("negotiable"))
+            + bool(flexibility.get("daysNegotiable"))
+            + bool(flexibility.get("timeNegotiable"))
+        )
+        return flags / 3.0
+    return 0.0
+
+
+def combo_priority_signal(outcome: dict[str, Any], priority: str) -> float:
+    """Mean :func:`priority_signal` over the jobs in one week, 0..1."""
+    candidates = outcome["candidates"]
+    if not candidates:
+        return 0.0
+    return sum(priority_signal(c, priority) for c in candidates) / len(candidates)
+
+
+def balanced_score(outcome: dict[str, Any], priority: str) -> float:
+    """What the ``balanced`` plan is actually ranked on. Higher is better.
+
+    ``effectiveHourlyWage × (1 + BALANCED_PRIORITY_WEIGHT × signal)``. With a
+    zero signal — ``wage``, ``distance``, or a week of unrated postings — this
+    is exactly the effective wage, so nothing changes for those requests. With
+    ``rating`` or ``flexibility`` it is a bounded nudge: worth at most
+    :data:`BALANCED_PRIORITY_WEIGHT` of the wage, enough to reorder two
+    comparable weeks, never enough to prefer a clearly worse one.
+    """
+    signal = combo_priority_signal(outcome, priority)
+    return outcome["effectiveHourlyWage"] * (1.0 + BALANCED_PRIORITY_WEIGHT * signal)
 
 
 def priority_score(candidate: dict[str, Any], priority: str) -> float:
@@ -338,13 +406,16 @@ def day_order(day: str) -> int:
 __all__ = [
     "PLAN_LABELS",
     "PRIORITY_LEAD_PLAN",
+    "balanced_score",
     "build_pool",
     "combination_hash",
+    "combo_priority_signal",
     "day_order",
     "enumerate_plans",
     "evaluate_combination",
     "hash_is_excluded",
     "plan_id",
     "priority_score",
+    "priority_signal",
     "select_plans",
 ]

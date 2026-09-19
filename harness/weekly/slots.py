@@ -1,20 +1,33 @@
 """Free time, computed once on the server so the front end only has to draw it.
 
-A weekday runs from :data:`DAY_START_MINUTES` to :data:`DAY_END_MINUTES`. A day
-with no fixed schedule is one slot, starting at home. A day *with* one yields a
-single slot running from when that schedule ends to the end of the day,
-starting wherever it dropped the user (``endLocation``).
+A weekday runs from :data:`DAY_START_MINUTES` to :data:`DAY_END_MINUTES`. Every
+slot is a window the user is free in, and it carries **both ends**:
 
-The morning before a fixed schedule is deliberately **not** offered, even when
-it is hours long. A request states only where a fixed schedule *ends*, never
-where it begins, so there is no way to check that someone finishing a shift at
-08:40 can reach their 09:00 obligation. Offering that window would mean
-assuming a trip nobody described. This is also why the contract's worked
-example comes out exactly right: a 09:00–18:00 schedule yields ``18:00–24:00``
-and no stray morning sliver.
+* ``fromMinutes``/``fromLocation`` — when and where the user becomes free;
+* ``toMinutes``/``toLocation`` — the moment they must be somewhere else, and
+  where that is.
+
+A day with no fixed schedule is one slot: home 08:00, back home by 24:00. A day
+*with* one yields up to two slots:
+
+* the window **after** it, from where the schedule dropped the user
+  (``endLocation``) until the end of the day, closing at home;
+* the window **before** it, from home at 08:00 until the schedule starts,
+  closing at the schedule itself.
+
+The second one is why both ends are modelled. A request states only where a
+fixed schedule *ends*, never where it begins, so a morning shift has to be
+checked against an assumption: this pipeline assumes the schedule **starts
+where it ends** (``endLocation``) and says so, in :data:`SLOT_DISCLOSURE` and in
+each slot's own ``toLocation``/``assumedEndLocation`` fields. Without that bound
+a morning shift would only have to let the user home by 24:00, which is no
+constraint at all — they would simply miss the 09:00 obligation.
 
 Slots shorter than ``minBlockHours`` are dropped — real free time, but no shift
-this user accepts could ever be placed in them.
+this user accepts could ever be placed in them. That is also why the contract's
+worked example is unchanged by the morning window: a 09:00–18:00 schedule with
+``minBlockHours: 2`` leaves an 08:00–09:00 sliver that no shift fits, so the
+day still reports ``18:00–24:00`` and nothing else.
 """
 
 from __future__ import annotations
@@ -24,10 +37,17 @@ from typing import Any
 from .constants import DAY_END_MINUTES, DAY_START_MINUTES, DAYS
 from .timeutil import format_hhmm
 
+#: ``boundedBy`` values. ``dayEnd`` closes at home by 24:00; ``fixedSchedule``
+#: closes at the next fixed obligation on that weekday.
+SLOT_BOUND_DAY_END = "dayEnd"
+SLOT_BOUND_FIXED_SCHEDULE = "fixedSchedule"
+
 SLOT_DISCLOSURE = (
-    "고정 일정이 있는 요일은 그 일정이 끝난 뒤 시간만 후보로 봅니다. 요청에는 고정 일정의 "
-    "종료 장소(endLocation)만 있고 시작 장소가 없어, 일정 시작 전 시간대는 이동 가능 여부를 "
-    "확인할 수 없기 때문입니다."
+    "고정 일정이 있는 요일은 일정 전후 두 구간을 모두 후보로 봅니다. 일정이 끝난 뒤 구간은 "
+    "종료 장소(endLocation)에서 출발해 24:00까지 귀가할 수 있어야 하고, 일정 시작 전 구간은 "
+    "집에서 출발해 일정 시작 시각까지 도착할 수 있어야 합니다. 다만 요청에는 고정 일정의 "
+    "시작 장소가 없어, 시작 장소를 종료 장소(endLocation)와 같다고 가정했습니다. 가정이므로 "
+    "각 구간의 toLocation에 그대로 표시합니다."
 )
 
 
@@ -41,24 +61,72 @@ def build_available_slots(profile: dict[str, Any]) -> list[dict[str, Any]]:
     for day in DAYS:
         fixed = fixed_by_day.get(day)
         if fixed is None:
-            start, location = DAY_START_MINUTES, home
+            windows = [
+                _window(
+                    day=day,
+                    start=DAY_START_MINUTES,
+                    end=DAY_END_MINUTES,
+                    from_location=home,
+                    to_location=home,
+                    bounded_by=SLOT_BOUND_DAY_END,
+                    assumed=False,
+                )
+            ]
         else:
-            start = max(fixed["endMinutes"], DAY_START_MINUTES)
-            location = fixed["endLocation"]
-        end = DAY_END_MINUTES
-        if end - start < min_block_minutes:
-            continue
-        slots.append(
-            {
-                "day": day,
-                "from": format_hhmm(start),
-                "to": format_hhmm(end),
-                "fromLocation": location,
-                "fromMinutes": start,
-                "toMinutes": end,
-            }
-        )
+            windows = [
+                # before the fixed schedule: home → (assumed) its start location
+                _window(
+                    day=day,
+                    start=DAY_START_MINUTES,
+                    end=fixed["startMinutes"],
+                    from_location=home,
+                    to_location=fixed["endLocation"],
+                    bounded_by=SLOT_BOUND_FIXED_SCHEDULE,
+                    assumed=True,
+                ),
+                # after it: where it dropped the user → home, by 24:00
+                _window(
+                    day=day,
+                    start=max(fixed["endMinutes"], DAY_START_MINUTES),
+                    end=DAY_END_MINUTES,
+                    from_location=fixed["endLocation"],
+                    to_location=home,
+                    bounded_by=SLOT_BOUND_DAY_END,
+                    assumed=False,
+                ),
+            ]
+        for window in windows:
+            if window["toMinutes"] - window["fromMinutes"] < min_block_minutes:
+                continue
+            slots.append(window)
+
+    slots.sort(key=lambda slot: (DAYS.index(slot["day"]), slot["fromMinutes"]))
     return slots
+
+
+def _window(
+    *,
+    day: str,
+    start: int,
+    end: int,
+    from_location: str,
+    to_location: str,
+    bounded_by: str,
+    assumed: bool,
+) -> dict[str, Any]:
+    start = max(int(start), 0)
+    end = min(int(end), DAY_END_MINUTES)
+    return {
+        "day": day,
+        "from": format_hhmm(start) if start <= end else format_hhmm(end),
+        "to": format_hhmm(max(end, start)),
+        "fromLocation": from_location,
+        "toLocation": to_location,
+        "boundedBy": bounded_by,
+        "assumedEndLocation": assumed,
+        "fromMinutes": start,
+        "toMinutes": end,
+    }
 
 
 def slots_by_day(slots: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
@@ -71,17 +139,38 @@ def slots_by_day(slots: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]
     return grouped
 
 
+def slot_key(slot: dict[str, Any]) -> tuple[str, int]:
+    """Identity of one free window: weekday plus the minute it opens."""
+    return (slot["day"], slot["fromMinutes"])
+
+
 def public_slots(slots: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Drop the internal minute offsets before the slot goes over the wire."""
+    """Drop the internal minute offsets before the slot goes over the wire.
+
+    ``toLocation``/``boundedBy``/``assumedEndLocation`` are additive beyond the
+    contract's ``Slot``; they exist so the assumption above is visible in the
+    payload and not only in prose.
+    """
     return [
         {
             "day": slot["day"],
             "from": slot["from"],
             "to": slot["to"],
             "fromLocation": slot["fromLocation"],
+            "toLocation": slot["toLocation"],
+            "boundedBy": slot["boundedBy"],
+            "assumedEndLocation": slot["assumedEndLocation"],
         }
         for slot in slots
     ]
 
 
-__all__ = ["SLOT_DISCLOSURE", "build_available_slots", "public_slots", "slots_by_day"]
+__all__ = [
+    "SLOT_BOUND_DAY_END",
+    "SLOT_BOUND_FIXED_SCHEDULE",
+    "SLOT_DISCLOSURE",
+    "build_available_slots",
+    "public_slots",
+    "slot_key",
+    "slots_by_day",
+]

@@ -26,7 +26,6 @@ from __future__ import annotations
 from typing import Any
 
 from .constants import (
-    DAY_END_MINUTES,
     DAY_INDEX,
     NIGHT_START_MINUTES,
     PRE_WORK_BUFFER_MINUTES,
@@ -58,8 +57,9 @@ def build_candidates(
 
     A candidate carries the raw row plus the one assignment this pipeline would
     make for it *in isolation*. Travel inside a candidate is therefore measured
-    from the day's own origin (home, or where the fixed schedule ended); once
-    two jobs share a day, :mod:`harness.weekly.plans` recomputes it.
+    from the slot's own origin (home, or where the fixed schedule ended) to the
+    slot's own closing point; once two jobs share a slot,
+    :mod:`harness.weekly.plans` recomputes both ends from scratch.
     """
     profile = request["profile"]
     search = request["search"]
@@ -69,7 +69,6 @@ def build_candidates(
     age = constraints["age"]
     min_block_minutes = constraints["minBlockHours"] * 60
     allow_night = constraints["allowNight"]
-    home = profile["home"]
 
     counts = dict.fromkeys(FILTER_ORDER, 0)
     candidates: list[dict[str, Any]] = []
@@ -124,7 +123,6 @@ def build_candidates(
                 location=row.get("location"),
                 walk=walk,
                 day_slots=day_slots,
-                home=home,
             )
             if placement is not None:
                 placed.append({**shift, **placement})
@@ -156,14 +154,19 @@ def place_shift(
     location: str | None,
     walk: int,
     day_slots: dict[str, list[dict[str, Any]]],
-    home: str,
 ) -> dict[str, Any] | None:
     """Fit one shift into one of the day's slots, or return ``None``.
 
     Reachable means: leaving the origin no earlier than the moment the user is
     free there, the trip plus the pre-work buffer lands them at the workplace
-    before the shift starts — **and** the return trip home finishes inside the
-    planning day.
+    before the shift starts — **and** the onward trip reaches wherever the slot
+    closes (``toLocation``) by the minute it closes (``toMinutes``).
+
+    That second half is the whole point. A slot that ends at the day's end
+    closes at home by 24:00, which is the old behaviour. A slot that ends at a
+    fixed schedule closes at that schedule's (assumed) location by its start
+    time, so a shift finishing at 08:50 can no longer be called reachable for a
+    09:00 obligation just because the user could be home by midnight.
     """
     for slot in day_slots.get(day, ()):
         if start < slot["fromMinutes"] or end > slot["toMinutes"]:
@@ -176,14 +179,16 @@ def place_shift(
         depart_at = start - outbound - PRE_WORK_BUFFER_MINUTES
         if depart_at < slot["fromMinutes"]:
             continue
-        home_leg = leg_minutes(origin=location, destination=home, origin_walk=walk)
-        if end + home_leg > DAY_END_MINUTES:
+        onward = leg_minutes(
+            origin=location, destination=slot["toLocation"], origin_walk=walk
+        )
+        if end + onward > slot["toMinutes"]:
             continue
         return {
             "slot": slot,
             "originLocation": slot["fromLocation"],
             "outboundMinutes": outbound,
-            "homeLegMinutes": home_leg,
+            "onwardLegMinutes": onward,
             "departAtMinutes": depart_at,
             "slackMinutes": depart_at - slot["fromMinutes"],
         }
@@ -304,7 +309,7 @@ def _candidate(
     ]
     minutes = sum(s["endMinutes"] - s["startMinutes"] for s in assigned)
     hours = minutes / 60.0
-    solo_travel = sum(s["outboundMinutes"] + s["homeLegMinutes"] for s in assigned)
+    solo_travel = sum(s["outboundMinutes"] + s["onwardLegMinutes"] for s in assigned)
     return {
         "jobId": row["id"],
         "job": row,

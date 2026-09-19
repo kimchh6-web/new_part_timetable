@@ -27,9 +27,12 @@ from typing import Any
 
 from .candidates import FILTER_ORDER
 from .constants import (
+    BALANCED_PRIORITY_WEIGHT,
     DAY_INDEX,
     LONG_TRAVEL_MINUTES,
     MAX_BENEFITS,
+    MAX_WEEKLY_WORK_HOURS,
+    MAX_WEEKLY_WORK_HOURS_BASIS,
     SNIPPET_CHARS,
     TIGHT_TRANSFER_MINUTES,
     WEEKLY_HOLIDAY_MIN_HOURS,
@@ -50,6 +53,19 @@ HOLIDAY_PAY_DISCLOSURE = (
 QUALIFICATION_DISCLOSURE = (
     "자격 요건(면허·경력·우대사항·기타 요구사항)은 이 요청에 판단 근거가 없습니다. "
     "충족한 것으로 가정하지 않았고, 공고별로 확인이 필요한 항목을 그대로 내려보냅니다."
+)
+
+WEEKLY_CAP_DISCLOSURE = (
+    f"주 {MAX_WEEKLY_WORK_HOURS}시간 상한은 이 데모의 제품 정책입니다. 법정 근로시간을 "
+    "판정한 것이 아니고 법적 근거를 주장하지 않습니다. 실제 근로시간 규제는 계약 형태·나이·"
+    "사업장에 따라 달라지므로 이 응답으로 판단하지 마십시오."
+)
+
+BALANCED_PRIORITY_DISCLOSURE = (
+    f"priority가 rating 또는 flexibility면 균형안 순위에 실질 시급의 최대 "
+    f"{round(BALANCED_PRIORITY_WEIGHT * 100)}%까지 가산합니다. rating은 공고 평점÷5, "
+    "flexibility는 협의 가능 플래그 3개 중 충족 개수÷3이며, 평점이 없는 공고는 0점으로 "
+    "둡니다(모르는 값을 좋게 치지 않습니다). 최적화 solver가 아니라 공개된 가중치 한 개입니다."
 )
 
 DATASET_DISCLOSURE = (
@@ -84,6 +100,10 @@ def build_response(
             "engine": "deterministic",
             "llmUsed": False,
             "travelEstimateMode": TRAVEL_ESTIMATE_MODE,
+            "weeklyWorkHoursCap": {
+                "hours": MAX_WEEKLY_WORK_HOURS,
+                "basis": MAX_WEEKLY_WORK_HOURS_BASIS,
+            },
             "funnel": {key: funnel[key] for key in ("filteredFrom", *FILTER_ORDER)},
             "filterOrder": funnel["filterOrder"],
             "search": search,
@@ -101,11 +121,14 @@ def disclosures(request: dict[str, Any]) -> list[str]:
         HOLIDAY_PAY_DISCLOSURE,
         QUALIFICATION_DISCLOSURE,
         DATASET_DISCLOSURE,
+        WEEKLY_CAP_DISCLOSURE,
         "공고에 게시된 근무 시각은 조정하지 않습니다. timeNegotiable은 표시만 하고 계산에 쓰지 "
         "않습니다.",
         "자정을 넘기는 공고(예: 22:00~06:00)는 날짜를 추정해야 해서 후보에서 제외했습니다.",
         "추천은 제한된 후보 풀 안에서의 완전 탐색 결과입니다. 전체 최적해임을 주장하지 않습니다.",
     ]
+    if request["search"]["priority"] in ("rating", "flexibility"):
+        notes.append(BALANCED_PRIORITY_DISCLOSURE)
     if request["profile"]["constraints"]["age"] is None:
         notes.append("age가 없어 연령 조건은 확인하지 않았습니다.")
     if request["unknownFields"]:
@@ -168,10 +191,17 @@ def _reason(
         {shift["day"] for c in outcome["candidates"] for shift in c["assigned"]},
         key=lambda day: DAY_INDEX[day],
     )
+    priority = request["search"]["priority"]
+    balanced_head = "근무·이동 시간을 합친 실질 시급이 가장 높습니다."
+    if priority in ("rating", "flexibility"):
+        axis = "평점" if priority == "rating" else "일정 협의 가능성"
+        balanced_head = (
+            f"실질 시급에 요청한 우선순위({axis})를 가산해 가장 높은 조합입니다."
+        )
     head = {
         "maxIncome": "탐색한 조합 중 주급이 가장 높습니다.",
         "minTravel": "탐색한 조합 중 주간 이동 시간이 가장 짧습니다.",
-        "balanced": "근무·이동 시간을 합친 실질 시급이 가장 높습니다.",
+        "balanced": balanced_head,
     }[plan_type]
     rate = metrics["targetAchievementRate"]
     fit = (
@@ -452,10 +482,12 @@ def _timestamp(now: datetime | None) -> str:
 
 
 __all__ = [
+    "BALANCED_PRIORITY_DISCLOSURE",
     "DATASET_DISCLOSURE",
     "HOLIDAY_PAY_DISCLOSURE",
     "KST",
     "QUALIFICATION_DISCLOSURE",
+    "WEEKLY_CAP_DISCLOSURE",
     "build_response",
     "disclosures",
     "request_id",

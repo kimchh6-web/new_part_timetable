@@ -79,10 +79,16 @@ WEEKS_PER_MONTH = 4.3
 #: never adds it to income.
 WEEKLY_HOLIDAY_MIN_HOURS = 15
 
-#: Upper bound on total assigned hours in one plan. Taken from the contract's
-#: ``WEEKLY_LIMIT_EXCEEDED`` example ("주 42시간으로 상한을 넘습니다"), which implies a
-#: cap below 42; the statutory 40-hour week is used.
+#: Upper bound on total assigned hours in one plan. This is a **demo product
+#: policy**, not a legal limit and not a claim about working-time law: the
+#: contract's ``WEEKLY_LIMIT_EXCEEDED`` example ("주 42시간으로 상한을 넘습니다")
+#: implies a cap below 42, and 40 is the round number chosen for this demo. A
+#: reviewer who wants a different cap changes this line; nothing downstream
+#: describes it as statutory.
 MAX_WEEKLY_WORK_HOURS = 40
+
+#: Named so the response can say *why* the cap exists without implying law.
+MAX_WEEKLY_WORK_HOURS_BASIS = "demo_product_policy"
 
 #: One-way leg at or above this many minutes raises ``LONG_TRAVEL``.
 LONG_TRAVEL_MINUTES = 40
@@ -100,6 +106,17 @@ SNIPPET_CHARS = 60
 #: pool is the union over the axes, so the search is bounded and the result is
 #: explicitly a *bounded* search, not a global optimum.
 CANDIDATE_POOL_PER_AXIS = 15
+
+#: Ratings in the dataset run 0..5; used to normalise the ``rating`` priority
+#: signal into 0..1. See :func:`harness.weekly.plans.priority_signal`.
+MAX_RATING = 5.0
+
+#: How much the requested priority may move the ``balanced`` plan's ranking
+#: score, as a fraction of effective hourly wage. A **bounded nudge, not a
+#: solver**: at 0.15 a perfect priority signal is worth 15% of effective wage,
+#: so a materially cheaper week still wins, but two comparable weeks are split
+#: by what the user actually asked for instead of by job id.
+BALANCED_PRIORITY_WEIGHT = 0.15
 
 TARGET_AMOUNT_MIN = 1
 TARGET_AMOUNT_MAX = 10_000_000
