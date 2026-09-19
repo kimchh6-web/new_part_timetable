@@ -12,12 +12,14 @@ from urllib.parse import unquote, urlsplit
 from harness import run_harness
 from harness.models import parse_user_context
 from harness.runtime import DaytonaScheduleExecutionRuntime
+from harness.weekly import validate_request, WeeklyValidationError
 
 ROOT = Path(__file__).resolve().parent
 RUNTIME = DaytonaScheduleExecutionRuntime()
 LOCK = threading.Lock()
 RESPONSE_TIMEOUT_SECONDS = 25
-ALLOWED_ORIGINS = {'http://127.0.0.1:5191', 'http://localhost:5191'}
+PORT = int(os.environ.get('HARNESS_PORT', '5191'))
+ALLOWED_ORIGINS = {f'http://127.0.0.1:{PORT}', f'http://localhost:{PORT}'}
 PUBLIC_ORIGIN = os.environ.get('HARNESS_PUBLIC_ORIGIN', '').rstrip('/')
 if PUBLIC_ORIGIN:
     ALLOWED_ORIGINS.add(PUBLIC_ORIGIN)
@@ -47,6 +49,8 @@ class Handler(SimpleHTTPRequestHandler):
 
     def do_GET(self):
         path = unquote(urlsplit(self.path).path)
+        if path == '/healthz':
+            return self._json(200, {'status': 'ok'})
         target = (ROOT / path.lstrip('/')).resolve()
         allowed = path in ('/', '/index.html') or (
             target.is_relative_to(ROOT / 'js') and target.suffix == '.js'
@@ -61,8 +65,9 @@ class Handler(SimpleHTTPRequestHandler):
     def do_POST(self):
         self.request_id = 'req_' + uuid.uuid4().hex
         started = time.perf_counter()
-        if self.path != '/api/demo/schedule':
+        if self.path not in ('/api/demo/schedule', '/api/recommendations'):
             return self._error(404, 'NOT_FOUND', '지원하지 않는 경로입니다.')
+        weekly = self.path == '/api/recommendations'
         # This local demo accepts only its own browser origin.
         origin = self.headers.get('Origin')
         if origin and origin not in ALLOWED_ORIGINS:
@@ -82,7 +87,12 @@ class Handler(SimpleHTTPRequestHandler):
         except TimeoutError:
             return self._error(408, 'REQUEST_TIMEOUT', '요청 본문 전송 시간이 초과되었습니다.')
         try:
-            parse_user_context(payload)
+            if weekly:
+                validate_request(payload)
+            else:
+                parse_user_context(payload)
+        except WeeklyValidationError as exc:
+            return self._error(exc.status, exc.code, str(exc), exc.details)
         except ValueError as exc:
             return self._error(400, 'VALIDATION_ERROR', str(exc))
         if not LOCK.acquire(blocking=False):
@@ -92,7 +102,9 @@ class Handler(SimpleHTTPRequestHandler):
 
         def execute():
             try:
-                outcome['result'] = run_harness(payload, runtime=RUNTIME)
+                outcome['result'] = RUNTIME.execute_weekly(payload) if weekly else run_harness(payload, runtime=RUNTIME)
+            except WeeklyValidationError as exc:
+                outcome['domain_error'] = exc
             except Exception:
                 outcome['failed'] = True
             finally:
@@ -106,15 +118,18 @@ class Handler(SimpleHTTPRequestHandler):
             return self._error(504, 'TIMEOUT', '일정 생성 응답 시간이 초과되었습니다. 잠시 후 다시 시도해 주세요.')
         if outcome.get('failed'):
             return self._error(503, 'DAYTONA_UNAVAILABLE', 'Daytona 실행 실패. 서버 설정과 네트워크를 확인해 주세요.')
+        if outcome.get('domain_error'):
+            exc = outcome['domain_error']
+            return self._error(exc.status, exc.code, str(exc), exc.details)
         result = outcome['result']
         result['requestId'] = self.request_id
         result['generatedAt'] = datetime.now(timezone(timedelta(hours=9))).isoformat(timespec='seconds')
-        result['source'] = 'llm' if result['meta'].get('ranking_provider') == 'nosana' else 'fallback'
-        result['meta']['contractVersion'] = 'demo.v1'
+        result['source'] = 'fallback' if weekly else ('llm' if result['meta'].get('ranking_provider') == 'nosana' else 'fallback')
+        result['meta']['contractVersion'] = 'weekly.v1' if weekly else 'demo.v1'
         result['meta']['totalLatencyMs'] = round((time.perf_counter() - started) * 1000)
         self._json(200, result)
 
 
 if __name__ == '__main__':
-    print('Web demo: http://127.0.0.1:5191/#/live', flush=True)
-    ThreadingHTTPServer(('127.0.0.1', 5191), Handler).serve_forever()
+    print(f'Web app: http://127.0.0.1:{PORT}/', flush=True)
+    ThreadingHTTPServer(('127.0.0.1', PORT), Handler).serve_forever()

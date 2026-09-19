@@ -175,6 +175,9 @@ class DaytonaScheduleExecutionRuntime:
 
     def _acquire_sandbox(self) -> Any:
         if self._sandbox is not None:
+            # SDK objects retain the state from acquisition. Refresh it so an
+            # auto-stopped sandbox can serve the next request after idle time.
+            self._sandbox = self._ensure_started(self._daytona().get(self._sandbox.id))
             return self._sandbox
         daytona = self._daytona()
 
@@ -250,6 +253,7 @@ class DaytonaScheduleExecutionRuntime:
         jobs: list[dict] | None = None,
         *,
         mock_jobs: list[dict] | None = None,
+        _mode: str = "daily",
     ) -> dict:
         """Plan candidate schedules remotely; return ``{candidates, meta}``.
 
@@ -284,7 +288,7 @@ class DaytonaScheduleExecutionRuntime:
         # one request file per call: a reused sandbox must never let a second
         # invocation read the first one's input
         request_name = f"request-{uuid.uuid4().hex}.json"
-        request = {"ctx": ctx, "jobs": rows, "mock_jobs": rows}
+        request = {"ctx": ctx, "jobs": rows, "mock_jobs": rows, "mode": _mode}
         sandbox.fs.upload_files(
             [
                 FileUpload(
@@ -340,7 +344,7 @@ class DaytonaScheduleExecutionRuntime:
                     else "loaded from the canonical dataset in the sandbox"
                 )
                 + f" ({meta.get('jobs_loaded', 'unknown')} rows), planned "
-                + f"{len(candidates)} candidate schedule(s)",
+                + f"{payload.get('result', {}).get('candidateCount', len(candidates))} candidate schedule(s)",
             ]
         )
 
@@ -355,4 +359,17 @@ class DaytonaScheduleExecutionRuntime:
         )
         self.meta = meta
         self.last_proof = execution_proof
+        if _mode == "weekly":
+            if payload.get("domain_error"):
+                from harness.weekly import WeeklyValidationError
+                error = payload["domain_error"]
+                raise WeeklyValidationError(error["code"], error["message"],
+                                            status=error["status"], details=error["details"])
+            result = payload["result"]
+            result.setdefault("meta", {}).update(meta)
+            return result
         return {"candidates": candidates, "meta": meta}
+
+    def execute_weekly(self, payload: dict) -> dict:
+        """Load the canonical dataset and build weekly plans in Daytona."""
+        return self.execute(payload, _mode="weekly")

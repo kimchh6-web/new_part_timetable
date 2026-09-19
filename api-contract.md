@@ -1,11 +1,11 @@
-# Live demo API — demo.v1
+# Web API — weekly.v1 / demo.v1
 
-이 문서는 **현재 구현된 일일 일정 라이브 데모**의 계약이다.
-`python web_demo.py` → `http://127.0.0.1:5191/#/live`.
+`python web_demo.py` → `http://127.0.0.1:5191/`.
+기본 웹 흐름은 [주간 추천 계약](examples/WEEKLY_API.md)의
+`POST /api/recommendations`를 사용한다. 아래 일일 데모 계약은 `/#/live`에서 유지한다.
 
-`POST /api/recommendations`의 주간 3안 계약은 아직 구현되지 않았다.
-현재 엔드포인트에 주간 `profile/search/regenerate` 요청을 보내지 않는다.
-기존 주간 추천 화면은 브라우저의 기존 계산 경로를 사용한다.
+두 API 모두 제공된 600개 합성 공고를 사용한다. 실제 구인 공고나 확정된 근무 배정이 아니다.
+일일 `availability` 입력과 주간 `profile/search/regenerate` 입력은 서로 대체할 수 없다.
 
 ## POST /api/demo/schedule
 
@@ -14,7 +14,8 @@
 
 Cloudflare Tunnel 공개 시 서버의 `HARNESS_PUBLIC_ORIGIN`에 발급된 HTTPS origin을
 설정하고 서버를 재시작한다. 지정된 origin과 localhost만 브라우저 POST를 허용한다.
-Quick Tunnel은 PC의 Python 서버에 연결하는 체험용 경로이며 영구 클라우드 호스팅이 아니다.
+현재 공개 주소는 계정 소유 Named Tunnel의 `https://timetable.shinick.dev`다.
+터널은 PC의 Python 서버에 연결하며 영구 클라우드 호스팅이 아니다.
 PC, Python 서버, cloudflared 프로세스를 유지해야 한다. 동시 계획 요청은 BUSY로 응답할 수 있다.
 
 ```json
@@ -106,7 +107,7 @@ Job block: `type=job`, `start`, `end`, `duration_min`, `job_id`, `platform`, `ti
 |---|---|---|
 | 400 | VALIDATION_ERROR | JSON, 필수값, 시간, 필드 타입 오류 |
 | 403 | ORIGIN_NOT_ALLOWED | 다른 origin 요청 |
-| 404 | NOT_FOUND | 미지원 API/경로 (주간 recommendations 포함) |
+| 404 | NOT_FOUND | 미지원 API/경로 |
 | 405 | METHOD_NOT_ALLOWED | 미지원 HEAD 요청 |
 | 408 | REQUEST_TIMEOUT | 본문 수신 15초 초과 |
 | 415 | UNSUPPORTED_MEDIA_TYPE | JSON Content-Type 아님 |

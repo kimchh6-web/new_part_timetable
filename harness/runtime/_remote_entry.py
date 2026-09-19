@@ -50,7 +50,23 @@ def main(argv: list[str]) -> int:
         rows = request.get("jobs")
         if rows is None:
             rows = request.get("mock_jobs")  # accepted for older request files
-        batch = run_planning(request["ctx"], rows)
+        if request.get("mode", "daily") == "weekly":
+            from harness.sources import JsonJobSource
+            from harness.weekly import build_weekly_recommendations, WeeklyValidationError
+            loaded = JsonJobSource().get_jobs(request["ctx"]) if rows is None else rows
+            try:
+                result = build_weekly_recommendations(request["ctx"], loaded)
+                payload["result"] = result
+                batch = {"candidates": [], "meta": dict(result.get("meta", {}))}
+                batch["meta"].update(jobs_loaded=len(loaded), job_source="demo_json")
+            except WeeklyValidationError as exc:
+                payload["domain_error"] = {
+                    "code": exc.code, "status": exc.status,
+                    "message": str(exc), "details": exc.details,
+                }
+                batch = {"candidates": [], "meta": {"jobs_loaded": len(loaded)}}
+        else:
+            batch = run_planning(request["ctx"], rows)
         payload.update(
             {
                 "execution_ok": True,
