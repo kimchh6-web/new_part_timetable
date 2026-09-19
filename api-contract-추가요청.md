@@ -1,5 +1,9 @@
 # API 계약서 추가 요청 — `PlanJob` 필드 3개
 
+> 구현 상태: 일일 라이브 데모 API의 `schedule` 내 job block에 `timeNegotiable`,
+> `minWeeks`, `benefits`를 추가했습니다. [현재 API 계약](api-contract.md)을 참고하세요.
+> 아래 주간 `plans[].jobs[]` 경로는 아직 미구현입니다.
+
 > 대상: `POST /api/recommendations` 응답의 `plans[].jobs[]` (`PlanJob`)
 > 요청자: 프론트엔드 / 2026-09-19
 

@@ -32,6 +32,10 @@ The default demo executes actual planning in Daytona. `--local` is explicit deve
 
 ## Backend contract
 
+The live HTTP contract and error/timeout behavior are documented in
+[api-contract.md](api-contract.md). Sponsor Q&A grounded in this implementation:
+[Daytona pitch defense](examples/DAYTONA_PITCH_DEFENSE.md).
+
 ```python
 from harness import run_harness
 

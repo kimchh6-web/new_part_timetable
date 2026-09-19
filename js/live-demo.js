@@ -33,10 +33,11 @@ function viewLiveDemo() {
     const started = performance.now();
     try {
       const response = await fetch('/api/demo/schedule', {
-        method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)
+        method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload),
+        signal: AbortSignal.timeout(30000)
       });
       const result = await response.json();
-      if (!response.ok) throw new Error(result.message || result.error || '요청 실패');
+      if (!response.ok) throw new Error(result.error?.message || result.message || '요청 실패');
       const meta = result.meta;
       if (meta.runtime_provider !== 'daytona' || !meta.execution_ok) throw new Error('Daytona 실행을 확인할 수 없습니다.');
       const won = value => Number(value).toLocaleString('ko-KR');
@@ -44,6 +45,7 @@ function viewLiveDemo() {
         <strong style="min-width:110px">${esc(block.start)}–${esc(block.end)}</strong>
         <div><strong>${block.type === 'job' ? '💼 ' + esc(block.title) : '🚇 ' + esc(block.from) + ' → ' + esc(block.to)}</strong>
         ${block.type === 'job' ? `<p>${esc(block.platform)} · ${esc(block.company)} · 시급 ${won(block.hourly_wage)}원</p>` : ''}
+        ${block.type === 'job' ? `<p>${block.timeNegotiable ? '시간 협의 가능 · ' : ''}${block.minWeeks == null ? '최소 기간 미확인' : `최소 ${esc(block.minWeeks)}주`}${block.benefits?.length ? ' · ' + block.benefits.map(esc).join(' · ') : ''}</p>` : ''}
         ${block.schedule_status === 'proposed' ? `<p style="color:#92400e">시간 변경 제안: 게시 ${esc(block.published_start)}–${esc(block.published_end)} → 위 시간 · 고용주 확인 필요</p>` : ''}</div></div>`).join('');
       output.innerHTML = `<div class="card">
         <div class="eyebrow">DAYTONA 실행 완료 · ${((performance.now()-started)/1000).toFixed(1)}초</div>
@@ -58,7 +60,8 @@ function viewLiveDemo() {
         <details><summary>실제 응답 JSON</summary><pre style="white-space:pre-wrap;max-height:300px;overflow:auto">${esc(JSON.stringify(result,null,2))}</pre></details>
       </div>`;
     } catch (error) {
-      output.innerHTML = `<div class="card"><h2>실행을 완료하지 못했습니다</h2><p>${esc(error.message)}</p><p>python web_demo.py로 서버를 시작한 뒤 http://127.0.0.1:5191/#/live 에 접속해 주세요.</p></div>`;
+      const message = error.name === 'TimeoutError' ? '30초 안에 응답을 받지 못했습니다. 잠시 후 다시 시도해 주세요.' : error.message;
+      output.innerHTML = `<div class="card"><h2>실행을 완료하지 못했습니다</h2><p>${esc(message)}</p><p>python web_demo.py로 서버를 시작한 뒤 http://127.0.0.1:5191/#/live 에 접속해 주세요.</p></div>`;
     } finally {
       button.disabled = false;
       button.textContent = '조건 바꿔 다시 추천받기 →';

@@ -214,6 +214,9 @@ ScheduleBlock = TypedDict(
         "address": str,
         "hourly_wage": int,
         "source_url": str,
+        "timeNegotiable": bool,
+        "minWeeks": int | None,
+        "benefits": list[str],
         # negotiation policy B: a PROPOSED delayed start, not an agreed one.
         # published_start/published_end always carry the employer's real posted
         # times so nothing here can be mistaken for a confirmed schedule.
