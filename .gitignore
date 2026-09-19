@@ -1,3 +1,8 @@
 .DS_Store
 Thumbs.db
 *.log
+__pycache__/
+*.py[cod]
+.venv/
+.env
+.runtime/

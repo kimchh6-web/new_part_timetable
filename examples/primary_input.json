@@ -1,0 +1,25 @@
+{
+  "start_location": "서울 강남",
+  "home_location": "서울 용산",
+  "availability": {
+    "start": "14:00",
+    "end": "20:00"
+  },
+  "travel_preferences": [
+    "퇴근 경로 인근"
+  ],
+  "weekly_income_target": 250000,
+  "skills": [
+    "POS 경험 6개월",
+    "보건증"
+  ],
+  "preferred_jobs": [
+    "의류 행사",
+    "매장 정리"
+  ],
+  "avoid_jobs": [
+    "설거지",
+    "주방 보조"
+  ],
+  "allow_negotiable_proposals": true
+}
