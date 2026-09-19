@@ -8,8 +8,13 @@ The whole surface is one call - no wrapper objects, no ``.to_dict()``::
 
 Scope: **one day**. ``run_harness`` plans a single target weekday and the
 summary it returns is a single day's income measured against the user's weekly
-target (``target_progress_percent`` = today's share of the week). There is no
-week-planning call to show here, so this snippet does not imply one.
+target (``target_progress_percent`` = today's share of the week).
+
+Week planning is a *separate* seam with its own request and response shape --
+``DaytonaScheduleExecutionRuntime().execute_weekly(request)``, documented in
+``examples/WEEKLY_API.md``. The two contracts do not share inputs: a daily
+``availability`` payload is not a weekly ``profile``/``search`` request, and
+neither response can be read as the other. This snippet shows the daily one.
 
 Framework shape::
 

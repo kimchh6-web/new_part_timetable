@@ -177,8 +177,16 @@ class DaytonaScheduleExecutionRuntime:
         if self._sandbox is not None:
             # SDK objects retain the state from acquisition. Refresh it so an
             # auto-stopped sandbox can serve the next request after idle time.
-            self._sandbox = self._ensure_started(self._daytona().get(self._sandbox.id))
-            return self._sandbox
+            try:
+                self._sandbox = self._ensure_started(
+                    self._daytona().get(self._sandbox.id)
+                )
+                return self._sandbox
+            except Exception:
+                # The handle we held is gone (deleted, or the account rotated
+                # it). Forget it and acquire from scratch rather than failing
+                # every later request for the lifetime of the process.
+                self._forget_sandbox()
         daytona = self._daytona()
 
         for candidate in self._candidate_ids():
@@ -204,6 +212,17 @@ class DaytonaScheduleExecutionRuntime:
         self._reused = False
         self._remember_id(sandbox.id)
         return sandbox
+
+    def _forget_sandbox(self) -> None:
+        """Drop every assumption tied to one sandbox instance.
+
+        ``_uploaded``/``_python`` describe a *filesystem*, not the account, so
+        they must not survive a change of sandbox: a new sandbox has neither
+        the harness package nor a resolved interpreter.
+        """
+        self._sandbox = None
+        self._uploaded = False
+        self._python = ""
 
     # -- upload / run ------------------------------------------------------
 
@@ -288,7 +307,10 @@ class DaytonaScheduleExecutionRuntime:
         # one request file per call: a reused sandbox must never let a second
         # invocation read the first one's input
         request_name = f"request-{uuid.uuid4().hex}.json"
-        request = {"ctx": ctx, "jobs": rows, "mock_jobs": rows, "mode": _mode}
+        # ``jobs`` is the only row carrier: shipping the same list twice would
+        # double the request for an injected dataset. The remote entry still
+        # reads ``mock_jobs`` from older request files.
+        request = {"ctx": ctx, "jobs": rows, "mode": _mode}
         sandbox.fs.upload_files(
             [
                 FileUpload(
@@ -360,15 +382,43 @@ class DaytonaScheduleExecutionRuntime:
         self.meta = meta
         self.last_proof = execution_proof
         if _mode == "weekly":
-            if payload.get("domain_error"):
-                from harness.weekly import WeeklyValidationError
-                error = payload["domain_error"]
-                raise WeeklyValidationError(error["code"], error["message"],
-                                            status=error["status"], details=error["details"])
-            result = payload["result"]
-            result.setdefault("meta", {}).update(meta)
-            return result
+            return self._weekly_result(payload, meta)
         return {"candidates": candidates, "meta": meta}
+
+    @staticmethod
+    def _weekly_result(payload: dict, meta: dict[str, Any]) -> dict:
+        """Map the sandbox's weekly outcome back to a typed domain result.
+
+        A refusal the weekly pipeline raised *in the sandbox* is a domain
+        answer, not a transport failure: it is re-raised here as the same
+        :class:`~harness.weekly.WeeklyValidationError` a local call would
+        raise, so the HTTP layer keeps mapping one exception type. Anything
+        else — a reply that is neither a result nor a typed refusal — is a
+        broken transport and must not be dressed up as either.
+        """
+        error = payload.get("domain_error")
+        if error:
+            from ..weekly import WeeklyValidationError
+
+            if not isinstance(error, dict) or not error.get("code"):
+                raise DaytonaRuntimeError(
+                    f"sandbox reported an unreadable domain error: {error!r}"
+                )
+            raise WeeklyValidationError(
+                str(error["code"]),
+                str(error.get("message") or ""),
+                status=error.get("status"),
+                details=error.get("details"),
+            )
+
+        result = payload.get("result")
+        if not isinstance(result, dict):
+            raise DaytonaRuntimeError(
+                "sandbox returned no weekly result and no domain error; "
+                f"got {type(result).__name__}"
+            )
+        result.setdefault("meta", {}).update(meta)
+        return result
 
     def execute_weekly(self, payload: dict) -> dict:
         """Load the canonical dataset and build weekly plans in Daytona."""

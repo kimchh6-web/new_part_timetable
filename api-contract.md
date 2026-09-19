@@ -89,10 +89,16 @@ Job block: `type=job`, `start`, `end`, `duration_min`, `job_id`, `platform`, `ti
 | minWeeks | number 또는 null | minWeeks; 누락 시 null |
 | benefits | string[] | benefits 앞 최대 5개; 누락 시 [] |
 
-`plans[].jobs[]`는 주간 계약의 경로다. 현재 일일 응답에는 없으며 위 필드들은 `schedule`의 job block에서 읽는다.
+`plans[].jobs[]`는 주간 계약([weekly.v1](examples/WEEKLY_API.md))의 경로이며 거기서도 같은 세 필드를
+제공한다. 일일 응답에는 `plans`가 없으므로 위 필드들은 `schedule`의 job block에서 읽는다.
 
 후보가 없을 때도 HTTP 200, `schedule=[]`, `daily_income=0`, `score=0`, `reasons=[]`.
 `meta.reason="no suitable job"`, 단계별 개수와 거절 이유를 유지한다.
+
+## GET /healthz
+
+`{"status": "ok"}`를 200으로 돌려주는 서버 생존 확인용 경로다. 인증·본문·origin 검사가 없고
+Daytona를 호출하지 않으므로 sandbox 잠금이나 원격 상태를 보장하지 않는다.
 
 ## 오류
 
@@ -124,9 +130,13 @@ API 키, 원격 내부 예외, 토큰은 오류 응답에 포함하지 않는다
 ## 확인 명령
 
 ```bash
-python -m unittest tests.test_live_api -v
+python -m unittest tests.test_live_api tests.test_http_weekly tests.test_daytona_transport -v
+python -m unittest discover -s tests          # 전체 스위트
+python web_demo.py                            # 기본 127.0.0.1:5191
+python examples/smoke_weekly.py --url http://127.0.0.1:5191   # 실제 Daytona 왕복
 python pitch_demo.py
-python web_demo.py
 ```
 
-전체 legacy 테스트가 모두 통과한다는 의미는 아니다. 주간 API와 legacy fixture 테스트 정리는 별도 범위이다.
+`tests/`가 `sys.path`에 있어야 `test_e2e.py`가 `support`를 import할 수 있으므로 전체 스위트는
+`python -m unittest discover -s tests`로 돌린다. `smoke_weekly.py`는 서버가 떠 있어야 하고
+컨트롤러 프로세스에 `DAYTONA_API_KEY`가 있어야 한다.

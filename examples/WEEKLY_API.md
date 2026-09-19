@@ -48,7 +48,10 @@ LLM 연결 실패를 기다리지 않는다. Daytona 실패는 503이며 로컬 
 - assignedShifts: `{day,start,end,travel}`. travel은 `fromLocation`, `transitMinutes`,
   `walkMinutes`, `bufferMinutes`, `departAt`을 담는다.
 - meta: `runtime_provider=daytona`, `execution_ok`, `jobs_loaded`, `job_source=demo_json`,
-  실행 근거, 단계별 개수, `contractVersion=weekly.v1`, `totalLatencyMs`.
+  단계별 개수, `contractVersion=weekly.v1`, `totalLatencyMs`.
+- meta.execution_proof: `sandbox_id`, `exit_code`(0만 성공으로 인정), `platform`, `python`,
+  `cwd`, `command`, `remote_seconds`, `controller_seconds`. meta.trace는 같은 내용을 사람이
+  읽는 순서로 남긴다. 이 값들은 sandbox가 보고한 관측값이며 컨트롤러가 채우지 않는다.
 
 `monthlyIncome = 주급 합계 × 4.3`. `targetAchievementRate`는 비율(1 = 100%).
 `weeklyWorkHours`는 배정된 근무시간, `weeklyTravelMinutes`는 도보 포함 이동시간,
@@ -83,6 +86,11 @@ LLM 연결 실패를 기다리지 않는다. Daytona 실패는 503이며 로컬 
 
 공통 본문 한도·origin·미지원 경로 오류는 상위 `api-contract.md` 참조.
 `GET /healthz`는 서버 생존 확인만 수행하며 Daytona 상태를 보장하지 않는다.
+sandbox 실행은 한 번에 하나다: 앞선 요청이 끝날 때까지 새 요청은 BUSY이고, 25초 TIMEOUT
+이후에도 원격 호출이 실제로 끝날 때까지 잠금을 유지한다.
 선택 엔드포인트 `/api/meta`, `/api/schedules/validate`는 제공하지 않는다.
 
 실행 검증: `python examples/smoke_weekly.py --url http://127.0.0.1:5191`.
+서버 프로세스에 `DAYTONA_API_KEY`가 있어야 한다. sandbox는 `.runtime/daytona-sandbox.json`
+(ID만 저장) 또는 `DAYTONA_SANDBOX_ID`로 재사용하고, 없으면 새로 만든다. 멈춘 sandbox는
+재사용 전에 상태를 다시 읽어 다시 시작하며, 사라진 sandbox는 새로 만들어 패키지를 다시 올린다.

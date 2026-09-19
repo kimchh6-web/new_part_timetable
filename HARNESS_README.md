@@ -1,6 +1,6 @@
 # Scheduler Harness — canonical demo dataset
 
-Harness implementation on `feature/agent-harness-daytona-nosana`; frontend/backend and the original repository README are untouched.
+Harness implementation living beside the demo web app; the original repository README is untouched.
 
 ## Dataset
 
@@ -13,9 +13,12 @@ All 600 records were inspected: 546 recruiting, 31 closed, 23 paused; seven cate
 For the verified three-case live pitch, run `python pitch_demo.py`. See
 [the 3-minute presentation guide](examples/PITCH.md). It uses real Daytona
 execution for all three cases and saves full responses under `.runtime/pitch/`.
-This is a daily-schedule CLI demo; the newer weekly HTTP API contract is not
-implemented. The legacy unit suite still contains outdated fixture expectations
-and is not fully passing; the three live pitch cases passed independently.
+`pitch_demo.py` is the daily-schedule CLI demo. The weekly HTTP contract
+(`POST /api/recommendations`, [weekly.v1](examples/WEEKLY_API.md)) is implemented
+as well and runs through the same Daytona sandbox; `python examples/smoke_weekly.py`
+exercises it against a running server. The unit suite passes as a whole under
+`python -m unittest discover -s tests` (pytest needs `tests/` on `sys.path`
+because `test_e2e.py` imports `support` as a top-level module).
 
 Python 3.10+:
 
@@ -74,7 +77,7 @@ Travel is a transparent demonstration estimate: **30 minutes base transit + the 
 Daytona = Agent Execution Plane
 Nosana  = Optional AI Reasoning / Inference Plane
 
-run_harness(input)
+run_harness(input)                        # one day  -> demo.v1
   -> parse user context
   -> DaytonaScheduleExecutionRuntime.execute()
        -> JsonJobSource loads the canonical jobs.json
@@ -83,7 +86,18 @@ run_harness(input)
        -> candidate timelines and gross income
   -> preference / capability ranking
   -> SchedulePlan JSON
+
+DaytonaScheduleExecutionRuntime.execute_weekly(request)   # one week -> weekly.v1
+  -> JsonJobSource loads the canonical jobs.json
+  -> harness.weekly.build_weekly_recommendations(request, rows)
+  -> 1-3 plans, available slots, per-shift travel
 ```
+
+Both calls upload the same stdlib-only `harness/**` package and run it in the
+sandbox. A refusal the weekly pipeline raises there (`NO_CANDIDATES`) travels
+back as data and is re-raised on the controller as the same
+`WeeklyValidationError`, so a domain answer is never confused with a transport
+failure - and a transport failure is never dressed up as a local result.
 
 Daytona is where the scheduling agent executes its planning tools. One sandbox is reused through an ignored ID-only `.runtime/` cache or `DAYTONA_SANDBOX_ID`. Execution metadata reports the actual sandbox, process exit code and remote platform. Credentials remain on the controller.
 

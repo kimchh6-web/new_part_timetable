@@ -53,18 +53,28 @@ def main(argv: list[str]) -> int:
         if request.get("mode", "daily") == "weekly":
             from harness.sources import JsonJobSource
             from harness.weekly import build_weekly_recommendations, WeeklyValidationError
+
+            # The canonical dataset is read *here*, inside the sandbox, through
+            # the same source seam the daily path uses.
             loaded = JsonJobSource().get_jobs(request["ctx"]) if rows is None else rows
+            provenance = {
+                "jobs_loaded": len(loaded),
+                "job_source": "caller_supplied" if rows is not None else "demo_json",
+            }
             try:
                 result = build_weekly_recommendations(request["ctx"], loaded)
                 payload["result"] = result
                 batch = {"candidates": [], "meta": dict(result.get("meta", {}))}
-                batch["meta"].update(jobs_loaded=len(loaded), job_source="demo_json")
             except WeeklyValidationError as exc:
+                # A refusal the pipeline states on purpose. It travels as data
+                # so the controller can re-raise the same type, and the run
+                # itself still counts as a successful remote execution.
                 payload["domain_error"] = {
                     "code": exc.code, "status": exc.status,
                     "message": str(exc), "details": exc.details,
                 }
-                batch = {"candidates": [], "meta": {"jobs_loaded": len(loaded)}}
+                batch = {"candidates": [], "meta": {}}
+            batch["meta"].update(provenance)
         else:
             batch = run_planning(request["ctx"], rows)
         payload.update(

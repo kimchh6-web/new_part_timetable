@@ -86,6 +86,10 @@ class Handler(SimpleHTTPRequestHandler):
             return self._error(400, 'VALIDATION_ERROR', '올바른 JSON 객체가 필요합니다.')
         except TimeoutError:
             return self._error(408, 'REQUEST_TIMEOUT', '요청 본문 전송 시간이 초과되었습니다.')
+        finally:
+            # The read deadline must not become a write deadline: a remote run
+            # can legitimately outlast it before the response is written.
+            self.connection.settimeout(None)
         try:
             if weekly:
                 validate_request(payload)
@@ -121,12 +125,15 @@ class Handler(SimpleHTTPRequestHandler):
         if outcome.get('domain_error'):
             exc = outcome['domain_error']
             return self._error(exc.status, exc.code, str(exc), exc.details)
-        result = outcome['result']
+        result = outcome.get('result')
+        if not isinstance(result, dict):
+            return self._error(503, 'DAYTONA_UNAVAILABLE', 'Daytona 실행 실패. 서버 설정과 네트워크를 확인해 주세요.')
+        meta = result.setdefault('meta', {})
         result['requestId'] = self.request_id
         result['generatedAt'] = datetime.now(timezone(timedelta(hours=9))).isoformat(timespec='seconds')
-        result['source'] = 'fallback' if weekly else ('llm' if result['meta'].get('ranking_provider') == 'nosana' else 'fallback')
-        result['meta']['contractVersion'] = 'weekly.v1' if weekly else 'demo.v1'
-        result['meta']['totalLatencyMs'] = round((time.perf_counter() - started) * 1000)
+        result['source'] = 'fallback' if weekly else ('llm' if meta.get('ranking_provider') == 'nosana' else 'fallback')
+        meta['contractVersion'] = 'weekly.v1' if weekly else 'demo.v1'
+        meta['totalLatencyMs'] = round((time.perf_counter() - started) * 1000)
         self._json(200, result)
 
 
