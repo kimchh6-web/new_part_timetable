@@ -6,7 +6,15 @@ $runtimeDir = Join-Path $repoRoot '.runtime'
 New-Item -ItemType Directory -Path $runtimeDir -Force | Out-Null
 $logPath = Join-Path $runtimeDir "supervisor-$Component.log"
 $mutex = New-Object System.Threading.Mutex($false, "Local\SchedulerHarness-$Component")
-if (-not $mutex.WaitOne(0)) { exit 0 }
+$owned = $false
+try {
+    $owned = $mutex.WaitOne(0)
+} catch [System.Threading.AbandonedMutexException] {
+    # The previous supervisor died without releasing the mutex; ownership passes to
+    # this process, so continue instead of failing the scheduled task forever.
+    $owned = $true
+}
+if (-not $owned) { exit 0 }
 try {
     $env:HARNESS_PUBLIC_ORIGIN = 'https://timetable.shinick.dev'
     if (-not $env:DAYTONA_API_KEY) {
@@ -37,6 +45,6 @@ try {
         Start-Sleep -Seconds 5
     }
 } finally {
-    $mutex.ReleaseMutex()
+    if ($owned) { $mutex.ReleaseMutex() }
     $mutex.Dispose()
 }
