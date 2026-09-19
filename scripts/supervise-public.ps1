@@ -24,6 +24,16 @@ try {
     if (-not $env:DAYTONA_API_URL) {
         $env:DAYTONA_API_URL = [Environment]::GetEnvironmentVariable('DAYTONA_API_URL', 'User')
     }
+    # A scheduled task does not inherit the interactive session's User
+    # variables, so the weekly semantic layer's settings are hydrated by name
+    # here or it silently stays deterministic after every restart. Names only
+    # are ever written to the log; values never are.
+    foreach ($name in 'NOSANA_API_KEY', 'WEEKLY_LLM_PROVIDER', 'WEEKLY_LLM_BASE_URL', 'WEEKLY_LLM_MODEL') {
+        if (-not (Get-Item -LiteralPath "env:$name" -ErrorAction SilentlyContinue)) {
+            $value = [Environment]::GetEnvironmentVariable($name, 'User')
+            if ($value) { Set-Item -LiteralPath "env:$name" -Value $value }
+        }
+    }
     # The child's stdout is a pipe now, so pin its encoding instead of letting the
     # console code page decide how Python writes into the log.
     $env:PYTHONIOENCODING = 'utf-8'

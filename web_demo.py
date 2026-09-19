@@ -13,16 +13,30 @@ from harness import run_harness
 from harness.models import parse_user_context
 from harness.runtime import DaytonaScheduleExecutionRuntime
 from harness.weekly import validate_request, WeeklyValidationError
+from harness.weekly.semantic import SEMANTIC_BUDGET_SECONDS, enrich_weekly_response
 
 ROOT = Path(__file__).resolve().parent
 RUNTIME = DaytonaScheduleExecutionRuntime()
 LOCK = threading.Lock()
 RESPONSE_TIMEOUT_SECONDS = 25
+# What the semantic layer must leave for writing the answer. The LLM attempt
+# runs inside the same worker as the Daytona call, so its budget is whatever is
+# left of the response deadline, never more than the layer's own 8 seconds.
+SEMANTIC_RESERVE_SECONDS = 2.0
 PORT = int(os.environ.get('HARNESS_PORT', '5191'))
 ALLOWED_ORIGINS = {f'http://127.0.0.1:{PORT}', f'http://localhost:{PORT}'}
 PUBLIC_ORIGIN = os.environ.get('HARNESS_PUBLIC_ORIGIN', '').rstrip('/')
 if PUBLIC_ORIGIN:
     ALLOWED_ORIGINS.add(PUBLIC_ORIGIN)
+
+
+def _semantic_budget(started):
+    """Seconds the semantic layer may spend without risking a 504."""
+    elapsed = time.perf_counter() - started
+    return min(
+        SEMANTIC_BUDGET_SECONDS,
+        RESPONSE_TIMEOUT_SECONDS - elapsed - SEMANTIC_RESERVE_SECONDS,
+    )
 
 
 class Handler(SimpleHTTPRequestHandler):
@@ -106,7 +120,16 @@ class Handler(SimpleHTTPRequestHandler):
 
         def execute():
             try:
-                outcome['result'] = RUNTIME.execute_weekly(payload) if weekly else run_harness(payload, runtime=RUNTIME)
+                if weekly:
+                    # Enrichment happens here, not after the wait: a semantic
+                    # pass that overran would otherwise keep running with its
+                    # answer already discarded.
+                    plans = RUNTIME.execute_weekly(payload)
+                    outcome['result'] = enrich_weekly_response(
+                        payload, plans, budget_seconds=_semantic_budget(started)
+                    )
+                else:
+                    outcome['result'] = run_harness(payload, runtime=RUNTIME)
             except WeeklyValidationError as exc:
                 outcome['domain_error'] = exc
             except Exception:
@@ -131,7 +154,10 @@ class Handler(SimpleHTTPRequestHandler):
         meta = result.setdefault('meta', {})
         result['requestId'] = self.request_id
         result['generatedAt'] = datetime.now(timezone(timedelta(hours=9))).isoformat(timespec='seconds')
-        result['source'] = 'fallback' if weekly else ('llm' if meta.get('ranking_provider') == 'nosana' else 'fallback')
+        if not weekly:
+            # Weekly answers already carry their own source: the semantic layer
+            # sets it, and says 'fallback' whenever it could not verify one.
+            result['source'] = 'llm' if meta.get('ranking_provider') == 'nosana' else 'fallback'
         meta['contractVersion'] = 'weekly.v1' if weekly else 'demo.v1'
         meta['totalLatencyMs'] = round((time.perf_counter() - started) * 1000)
         self._json(200, result)
