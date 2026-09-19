@@ -636,3 +636,127 @@ test('저장물 수정: 저장 후 다시 열어도 지표가 추천 당시 값�
   assert.match(html, /수정 내용 저장됨/);
   assert.match(html, /예상 월 수입 \(수정 전\)/);
 });
+
+/* =====================================================================
+ * 10. 당시 내 정보를 모르는 결과 — 지금 값으로 메우지 않는다
+ *
+ * 기록만이 아니라 세션에도 스냅샷이 없는 상태가 있다. 이 필드가 생기기 전에
+ * 열려 있던 탭의 sessionStorage 가 그렇다. 응답은 있는데 그 응답이 어떤 내
+ * 정보로 받아진 것인지 모르는 결과를 "지금 내 정보의 답"인 양 그리면, 화면은
+ * 서버가 본 적 없는 고정 일정·목표 금액을 그 결과의 일부라고 말하게 된다.
+ * ===================================================================*/
+
+/** 지금 내 정보와 확실히 구별되는 프로필 — 무엇이 새어 들어왔는지 이름으로 드러난다. */
+function changedProfile() {
+  const p = F.profileFixture({ goal: 1200000, home: '홍대' });
+  for (const d of F.DAY_KEYS) p.schedule[d] = { has: false, start: '', end: '', place: '' };
+  p.schedule.WED = { has: true, start: '09:00', end: '18:00', place: '신촌' };
+  return p;
+}
+
+test('옛 세션: 스냅샷 없는 세션의 결과를 바뀐 내 정보로 그리지 않는다', async () => {
+  const page = bootHome();
+  await generate(page, F.responseFixture());
+
+  // 이 필드들이 없던 때 남아 있던 세션 — 응답만 있고 당시 내 정보가 없다
+  const st = page.session();
+  delete st.profile;
+  delete st.profileUnknown;
+  page.sessionStorage.setItem('result', JSON.stringify(st));
+
+  page.seed('profile', changedProfile());
+  page.go('#/result');
+
+  const html = page.html();
+  assert.match(html, /요청 당시 내 정보가 남아 있지 않습니다/);
+  assert.equal(page.$$('.profile-drift').length, 1, '모른다는 사실을 화면이 밝혀야 한다');
+  assert.ok(!html.includes('신촌'), '지금의 고정 일정을 옛 결과의 시간표에 그리면 안 된다');
+  assert.equal(page.$$('.tt-block.fixed').length, 0);
+  assert.ok(!html.includes('홍대'), '지금의 집 위치를 당시 조건인 양 쓰면 안 된다');
+  assert.ok(!html.includes('1,200,000원'), '지금의 목표 금액을 그 결과의 목표로 쓰면 안 된다');
+  assert.match(html, /목표 알 수 없음/);
+  assert.match(html, /치킨하우스 반반 노원점/, '서버가 배정한 근무 자체는 그대로 보인다');
+  assert.equal(page.calls.length, 1, '있는 응답을 두고 다시 요청하지 않는다');
+
+  // 모른다는 사실은 세션에 남아 다시 열어도 같은 말을 한다
+  assert.equal(page.session().profileUnknown, true);
+  assert.equal(page.session().profile, undefined);
+  page.go('#/');
+  page.go('#/result');
+  assert.match(page.html(), /요청 당시 내 정보가 남아 있지 않습니다/);
+  assert.equal(page.calls.length, 1);
+});
+
+test('옛 세션: 스냅샷이 있는 결과와 갓 받은 결과는 그대로 둔다', async () => {
+  const page = bootHome();
+  await generate(page, F.responseFixture());
+
+  // 갓 받은 결과 — 모름 안내도, 조건이 다르다는 안내도 붙지 않는다
+  let html = page.html();
+  assert.equal(page.$$('.profile-drift').length, 0);
+  assert.match(html, /목표 600,000원/);
+  assert.equal(page.$$('.tt-block.fixed').length, 3, '당시 고정 일정(월·화·목)은 그대로 그린다');
+  assert.equal(page.session().profileUnknown, false);
+
+  // 화면을 다시 열어도 스냅샷이 있는 한 "모름" 으로 떨어지지 않는다
+  page.go('#/');
+  page.go('#/result');
+  html = page.html();
+  assert.ok(!html.includes('요청 당시 내 정보가 남아 있지 않습니다'));
+  assert.equal(page.session().profileUnknown, false);
+  assert.deepEqual(page.session().profile.schedule.MON, { has: true, start: '09:00', end: '18:00', place: '강남역' });
+});
+
+test('모르는 결과의 저장물: 지금 내 정보가 섞이지 않고, 다시 열어도 모름을 밝힌다', async () => {
+  const seedPage = bootHome();
+  await generate(seedPage, F.responseFixture());
+  const oldEntry = seedPage.stored('history')[0];
+  delete oldEntry.profile;                              // 이 필드가 없던 시절의 기록
+
+  const page = createPage();
+  page.seed('profile', changedProfile());
+  page.seed('history', [oldEntry]);
+  page.location._hash = '#/result';
+  page.boot();
+  assert.match(page.html(), /요청 당시 내 정보가 남아 있지 않습니다/);
+
+  page.click('#save');
+  page.click('#mok');
+
+  const saved = page.stored('schedules')[0];
+  assert.equal(saved.profile, null, '모르는 내 정보 자리에 지금 값을 저장하면 안 된다');
+  assert.equal(saved.profileUnknown, true);
+
+  // 다른 브라우저 세션처럼 새로 열어도 (그 사이 내 정보가 또 바뀌어도) 같은 말을 한다
+  const reopened = createPage();
+  reopened.seed('profile', F.profileFixture({ goal: 9990000, home: '수원' }));
+  reopened.seed('schedules', page.stored('schedules'));
+  reopened.location._hash = '#/schedule/' + saved.id;
+  reopened.boot();
+
+  const html = reopened.html();
+  assert.match(html, /추천 당시 내 정보가 남아 있지 않습니다/);
+  assert.match(html, /요청 당시 내 정보 없음/);
+  assert.ok(!html.includes('신촌'), '저장 시점의 고정 일정도, 다시 열 때의 고정 일정도 그리지 않는다');
+  assert.ok(!html.includes('수원'));
+  assert.ok(!html.includes('9,990,000원'));
+  assert.equal(reopened.$$('.tt-block.fixed').length, 0);
+  assert.match(html, /목표 알 수 없음/);
+  assert.match(html, /1,734,792원/, '서버가 계산한 지표 자체는 그대로 보인다');
+  assert.match(html, /치킨하우스 반반 노원점/);
+  assert.equal(reopened.calls.length, 0);
+});
+
+test('스냅샷이 있는 결과의 저장물은 당시 내 정보를 그대로 남긴다', async () => {
+  const page = bootHome();
+  await generate(page, F.responseFixture());
+  page.click('#save');
+  page.click('#mok');
+
+  const saved = page.stored('schedules')[0];
+  assert.equal(saved.profileUnknown, false);
+  assert.equal(saved.profile.goal, 600000);
+  assert.equal(saved.profile.home, '사당');
+  assert.match(page.html(), /집 사당/);
+  assert.ok(!page.html().includes('내 정보가 남아 있지 않습니다'));
+});

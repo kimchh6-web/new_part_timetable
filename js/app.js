@@ -112,6 +112,16 @@ function safeProfile(p) {
 }
 
 /**
+ * 당시 내 정보가 남아 있지 않은 결과를 그릴 때 쓰는 프로필.
+ * 지금의 집 위치·목표 금액·고정 일정을 빌려오지 않는다 — 모르는 자리는 빈 채로
+ * 두고, 화면이 그 사실을 밝힌다. goal 은 0 이 아니라 null 이다: 0 원은 "목표가
+ * 0 원"이라는 또 하나의 거짓말이기 때문이다.
+ */
+function unknownProfile() {
+  return safeProfile({ goal: null });
+}
+
+/**
  * 요청 결과를 좌우하는 프로필 필드만 뽑은 지문.
  * 화면 표시용 필드(sameDaily 등)는 보지 않는다. 결과를 받은 뒤 내 정보를 바꿨는지
  * 판단하는 데만 쓴다 — 바뀌었으면 그 결과는 지금 조건의 답이 아니다.
@@ -413,7 +423,7 @@ function viewResult() {
    */
   const viewProfile = () => {
     if (st.profile) return safeProfile(st.profile);
-    if (st.profileUnknown) return safeProfile({ ...safeProfile(currentProfile), schedule: {} });
+    if (st.profileUnknown || st.response) return unknownProfile();
     return safeProfile(currentProfile);
   };
 
@@ -427,6 +437,11 @@ function viewResult() {
   st.excluded = st.excluded || [];
   st.seenPlanIds = st.seenPlanIds || [];
   if (!st.sid) st.sid = newSessionId();
+  /* 응답은 있는데 그 응답이 어떤 내 정보로 받아진 것인지 모르는 상태 — 기록에서
+   * 복원한 것이든, 이 필드가 없던 때 남아 있던 세션이든 똑같이 "모름"이다.
+   * 모름을 표시하지 않으면 아래 viewProfile·profileDrift 가 지금 내 정보를
+   * 그 결과의 조건인 양 그려 버린다. */
+  if (st.response && !st.profile) st.profileUnknown = true;
   Session.set(st);
 
   function fromHistory(h) {
@@ -614,7 +629,7 @@ function viewResult() {
       ${resp.droppedPlans ? `<div style="height:10px"></div><div class="note warn">응답 중 ${resp.droppedPlans}개 안은 형식이 맞지 않아 표시하지 않았습니다.</div>` : ''}
       ${profileDrift ? `<div style="height:10px"></div><div class="note warn profile-drift" role="note">${st.profile
         ? '<b>지금의 내 정보와 다른 조건으로 받은 결과입니다.</b> 아래 시간표의 고정 일정·목표 금액은 이 결과를 받을 당시 값입니다.'
-        : '<b>이 기록에는 요청 당시 내 정보가 남아 있지 않습니다.</b> 당시 고정 일정을 알 수 없어 시간표에 그리지 않았습니다 — 지금의 고정 일정을 이 결과의 일부인 것처럼 보여 주지 않기 위해서입니다.'} 지금 조건으로 받으려면 <a href="#/">새로 추천받기</a>를 눌러 주세요.</div>` : ''}
+        : '<b>이 결과에는 요청 당시 내 정보가 남아 있지 않습니다.</b> 당시 고정 일정·집 위치·목표 금액을 알 수 없어 시간표와 지표에 그리지 않았습니다 — 지금의 내 정보를 이 결과의 일부인 것처럼 보여 주지 않기 위해서입니다.'} 지금 조건으로 받으려면 <a href="#/">새로 추천받기</a>를 눌러 주세요.</div>` : ''}
       <div style="height:16px"></div>
       <div class="grid-3">
         ${resp.plans.map((p, i) => {
@@ -706,7 +721,10 @@ function viewResult() {
           planType: plan.type,
           planLabel: plan.label,
           search: st.search,
-          profile: JSON.parse(JSON.stringify(viewProfile())),
+          // 당시 내 정보가 없으면 지금 값으로 메우지 않는다. 모른다는 사실 자체를
+          // 저장물에 남겨, 다시 열었을 때도 같은 말을 할 수 있게 한다.
+          profile: st.profile ? JSON.parse(JSON.stringify(st.profile)) : null,
+          profileUnknown: !st.profile,
           source: st.response.source,
           jobSource: st.response.jobSource || null,
           requestId: st.response.requestId,
@@ -763,7 +781,8 @@ function viewSchedule(id) {
   if (!sc) { app().innerHTML = `<div class="card empty"><div class="ic">🔍</div>스케줄을 찾을 수 없습니다.<br><br><a class="btn" href="#/my">내 스케줄로</a></div>`; return; }
 
   const legacy = !(sc.schemaVersion >= 2);
-  const profile = safeProfile(sc.profile);
+  const unknownProf = sc.profileUnknown === true;
+  const profile = unknownProf ? unknownProfile() : safeProfile(sc.profile);
   let editing = false, dirty = false;
   const work = (sc.jobs || []).map(j => (legacy ? toViewJobLegacy(j) : toViewJob(j)));
 
@@ -776,8 +795,10 @@ function viewSchedule(id) {
     const editedMetrics = !legacy && (dirty || sc.edited === true);
     app().innerHTML = `
       <div class="page-head"><div class="eyebrow">Saved · ${new Date(sc.createdAt).toLocaleString('ko-KR')}</div><h1>${esc(sc.title)}</h1>
-        <p>${esc(profile.role)} · 집 ${esc(profile.home)} · 목표 ${fmtWon(profile.goal)}${sc.planLabel ? ' · ' + esc(sc.planLabel) : ''}</p></div>
+        <p>${profileHeadLine(profile, unknownProf)}${sc.planLabel ? ' · ' + esc(sc.planLabel) : ''}</p></div>
       ${sourceNotice(sc.jobSource || null)}
+      ${unknownProf ? `<div style="height:12px"></div><div class="note warn profile-unknown" role="note"><b>이 시간표에는 추천 당시 내 정보가 남아 있지 않습니다.</b><br>
+        당시 고정 일정·집 위치·목표 금액을 알 수 없어, 지금의 내 정보로 메우지 않고 비워 두었습니다. 지금 조건으로 받으려면 <a href="#/">새로 추천받기</a>를 눌러 주세요.</div>` : ''}
       ${legacy ? `<div style="height:12px"></div><div class="note warn" role="note"><b>이전 버전에서 저장된 시간표입니다.</b><br>
         당시 브라우저에서 계산한 값이라 지금의 서버 계산 결과와 다를 수 있습니다. 시간표와 연락처는 그대로 보존됩니다.
         최신 기준으로 다시 받으려면 <a href="#/">새로 추천받기</a>를 눌러 주세요.</div>` : ''}
@@ -845,7 +866,7 @@ async function exportImage(sc, jobs, profile, withContact, legacy, editedMetrics
 
   wrap.innerHTML = `<div class="capture" id="capture">
     <h2>${esc(sc.title)}</h2>
-    <div class="sub">${esc(profile.role)} · 집 ${esc(profile.home)} · ${new Date(sc.createdAt).toLocaleDateString('ko-KR')} 생성</div>
+    <div class="sub">${profileHeadLine(profile, sc.profileUnknown === true)} · ${new Date(sc.createdAt).toLocaleDateString('ko-KR')} 생성</div>
     ${renderTimetable(jobs, profile, { compact: true })}
     <div class="summary">${metricCells.map(([k, v]) => `<div><div class="k">${k}</div><div class="v">${v}</div></div>`).join('')}</div>
     <div class="c-jobs">${jobs.map(j => `<div><b style="color:${CATEGORY_COLORS[j.category] || '#94a3b8'}">●</b> ${esc(j.company)} · ${esc(j.title)} · ${esc(j.location)} · 시급 ${j.hourlyWage == null ? '—' : j.hourlyWage.toLocaleString('ko-KR') + '원'}${withContact && j.contact ? ` · ${esc(j.contact.manager || '')} ${esc(j.contact.phone || '')}` : ''}</div>`).join('')}</div>
@@ -977,6 +998,14 @@ function localWeekly(jobs) {
  * ===================================================================*/
 const fmtMoney = v => (typeof v === 'number' && Number.isFinite(v) ? fmtWon(v) : '—');
 const fmtRate = v => (typeof v === 'number' && Number.isFinite(v) ? Math.round(v * 100) + '%' : '—');
+/* 목표 금액 — 당시 값을 모르는 결과에서는 지금 목표를 빌려 오지 않는다. */
+const fmtGoal = v => (typeof v === 'number' && Number.isFinite(v) ? fmtWon(v) : '알 수 없음');
+
+/* 결과·저장물 머리글의 "누구의 조건인가" 줄. 모르면 빈칸을 그럴듯하게 채우지 않는다. */
+function profileHeadLine(profile, unknown) {
+  if (unknown) return '요청 당시 내 정보 없음 · 신분 · 집 위치 · 목표 금액 미상';
+  return `${esc(profile.role)} · 집 ${esc(profile.home)} · 목표 ${fmtGoal(profile.goal)}`;
+}
 
 const SOURCE_LABEL = { fallback: '서버 규칙 계산', llm: 'LLM' };
 
@@ -1042,7 +1071,7 @@ function warningBlock(warnings, profile) {
 function metricsRowServer(m, profile, opts = {}) {
   const hold = m.weeklyHolidayPayIncluded;
   return `<div class="metrics-row${opts.stale ? ' stale' : ''}">
-    <div class="metric hl"><div class="k">예상 월 수입${opts.stale ? ' (수정 전)' : ''}</div><div class="v">${fmtMoney(m.monthlyIncome)}</div><div class="s">목표 ${fmtWon(profile.goal)}</div></div>
+    <div class="metric hl"><div class="k">예상 월 수입${opts.stale ? ' (수정 전)' : ''}</div><div class="v">${fmtMoney(m.monthlyIncome)}</div><div class="s">목표 ${fmtGoal(profile.goal)}</div></div>
     <div class="metric"><div class="k">목표 달성률</div><div class="v">${fmtRate(m.targetAchievementRate)}</div><div class="s">서버 계산</div></div>
     <div class="metric"><div class="k">주 총 근무시간</div><div class="v">${m.weeklyWorkHours == null ? '—' : m.weeklyWorkHours.toFixed(1) + 'h'}</div><div class="s">${hold === true ? '주휴수당 포함' : hold === false ? '주휴수당 미포함' : '주휴수당 여부 미확인'}</div></div>
     <div class="metric"><div class="k">주 총 이동시간</div><div class="v">${m.weeklyTravelMinutes == null ? '—' : fmtDur(Math.round(m.weeklyTravelMinutes))}</div><div class="s">도보 포함 · 왕복</div></div>
@@ -1135,7 +1164,10 @@ function jobItem(j, profile, opts = {}) {
   const serverMin = j.shifts.map(shiftTravelMinutes).find(v => v !== null && v !== undefined);
   const travelText = serverMin != null
     ? `<b>${serverMin}분</b>${firstTravel && firstTravel.fromLocation ? ` (${esc(firstTravel.fromLocation)} 출발${firstTravel.departAt ? ' · ' + esc(firstTravel.departAt) + ' 출발 권장' : ''})` : ''}`
-    : `<b>${travelMin(profile && profile.home, j.location)}분</b> (추정 · 집 ${esc(profile && profile.home || '')} 기준)`;
+    : (profile && profile.home
+      // 집 위치를 모르면 0 분이라고 말하지 않는다 — 추정의 근거 자체가 없다.
+      ? `<b>${travelMin(profile.home, j.location)}분</b> (추정 · 집 ${esc(profile.home)} 기준)`
+      : '<b>—</b> (당시 집 위치를 알 수 없어 추정하지 않음)');
   // 주 근무시간은 배정 시간의 합이라 화면에서 더해도 같은 값이지만, 서버 값이 없을 때는
   // 그 사실을 * 로 밝힌다. 주급은 서버가 계산하는 지표이므로 대신 곱하지 않는다.
   const serverHours = typeof j.weeklyHours === 'number';
