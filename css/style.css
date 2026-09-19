@@ -303,3 +303,26 @@ input:disabled, select:disabled { background: var(--surface-2); color: var(--mut
 .hero .pts { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 18px; }
 .hero .pts span { background: rgba(255,255,255,.14); border: 1px solid rgba(255,255,255,.2); padding: 6px 12px; border-radius: 999px; font-size: 13px; font-weight: 600; }
 .hero .btn { margin-top: 22px; background: #fff; color: var(--primary-2); border: none; }
+
+/* ---------- 결과 기록 사이드바 ---------- */
+.result-layout { display: grid; grid-template-columns: 250px minmax(0, 1fr); gap: 20px; align-items: start; }
+@media (max-width: 960px) { .result-layout { grid-template-columns: 1fr; } .hist { position: static !important; max-height: 260px; } }
+.hist { position: sticky; top: 76px; max-height: calc(100vh - 96px); overflow-y: auto; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 12px; box-shadow: var(--shadow); }
+.hist-head { display: flex; align-items: center; gap: 8px; padding: 4px 6px 10px; font-size: 14px; }
+.hist-head span { color: var(--muted); font-size: 12px; flex: 1; }
+.hist-head .btn { height: 26px; padding: 0 8px; font-size: 11px; }
+.hist-item { border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; cursor: pointer; transition: all .15s; background: #fff; }
+.hist-item + .hist-item { margin-top: 8px; }
+.hist-item:hover { border-color: #c7cbd8; }
+.hist-item.on { border-color: var(--primary); background: var(--primary-soft); }
+.hi-top { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--muted); }
+.hi-no { font-weight: 800; color: var(--primary); }
+.hi-time { flex: 1; }
+.hi-del { border: none; background: transparent; color: #b0b5c3; cursor: pointer; font-size: 12px; padding: 0 2px; }
+.hi-del:hover { color: var(--danger); }
+.hi-money { font-weight: 800; font-size: 15px; margin-top: 4px; letter-spacing: -.01em; }
+.hi-money small { font-weight: 600; color: var(--muted); font-size: 11px; }
+.hi-jobs { display: flex; flex-direction: column; gap: 3px; margin-top: 6px; }
+.hi-jobs span { font-size: 12px; padding-left: 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.hi-cond { font-size: 11px; color: var(--muted); margin-top: 6px; }
+.hist-empty { text-align: center; color: var(--muted); font-size: 12px; padding: 24px 8px; line-height: 1.6; }

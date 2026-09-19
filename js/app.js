@@ -212,6 +212,7 @@ function viewHome() {
           <div class="section-label">가장 중요한 것</div>
           <div class="seg" id="prio">${[['wage','시급'],['distance','거리'],['rating','평점'],['flex','시간 유연성']].map(([v, l]) => `<button class="${search.priority === v ? 'on' : ''}" data-v="${v}">${l}</button>`).join('')}</div>
           <div style="margin-top:24px"><button class="btn primary lg block" id="go">추천 조합 생성하기</button></div>
+          ${(Store.get('history', []) || []).length ? `<div style="margin-top:10px;text-align:center"><a class="btn ghost sm" href="#/result">🕘 이전 추천 결과 ${Store.get('history', []).length}건 보기</a></div>` : ''}
         </div>
       </div>
       <div>
@@ -253,11 +254,18 @@ function viewHome() {
  * ===================================================================*/
 function viewResult() {
   const profile = Store.get('profile');
-  const st = Session.get();
-  if (!st) return navigate('/');
-  const candidates = filterCandidates(JOBS, profile, st.search);
+  let st = Session.get();
+  const history = () => Store.get('history', []);
+  if (!st) {
+    const h = history();
+    if (!h.length) return navigate('/');
+    st = fromHistory(h[0]); Session.set(st);
+  }
+  let candidates = filterCandidates(JOBS, profile, st.search);
+  function fromHistory(h) { return { search: h.search, pinned: h.pinned || [], excluded: h.excluded || [], selected: 0, plans: h.plans, historyId: h.id }; }
 
   const run = () => {
+    candidates = filterCandidates(JOBS, profile, st.search);
     // 스켈레톤 (LLM 응답 지연 대비 UI — 현재는 코드 엔진이 즉시 계산)
     app().innerHTML = `
       <div class="page-head"><div class="eyebrow">Result</div><h1>추천 조합을 계산하고 있습니다…</h1><p>빈 슬롯 → 이동 가능 후보 ${candidates.length}건 → 겹치지 않는 조합 검증</p></div>
@@ -266,28 +274,67 @@ function viewResult() {
       const plans = generatePlans(candidates, profile, st.search, { pinned: st.pinned, excluded: st.excluded });
       st.plans = plans.map(p => ({ ...p, jobIds: p.jobs.map(j => j.id), jobs: undefined }));
       st.selected = Math.min(st.selected || 0, Math.max(0, st.plans.length - 1));
+      if (st.plans.length) {
+        const entry = { id: 'h' + Date.now().toString(36), createdAt: new Date().toISOString(), search: st.search, pinned: st.pinned, excluded: st.excluded, plans: st.plans, candidateCount: candidates.length };
+        Store.set('history', [entry, ...history()].slice(0, 30));
+        st.historyId = entry.id;
+      }
       Session.set(st);
       draw();
     }, 700);
   };
 
   const planJobs = p => p.jobIds.map(id => JOBS.find(j => j.id === id));
+  const KIND = { income: '수입 최대안', ease: '여유 우선안', balance: '밸런스안' };
+  const PRIO = { wage: '시급', distance: '거리', rating: '평점', flex: '유연성' };
+
+  const sidebar = () => {
+    const h = history();
+    return `<aside class="hist">
+      <div class="hist-head"><b>추천 결과 기록</b><span>${h.length}건</span>${h.length ? '<button class="btn ghost sm" id="hist-clear">전체 삭제</button>' : ''}</div>
+      ${h.length ? h.map((e, i) => {
+        const best = e.plans[0]; const bm = best.metrics;
+        const d = new Date(e.createdAt);
+        return `<div class="hist-item ${e.id === st.historyId ? 'on' : ''}" data-hid="${e.id}">
+          <div class="hi-top"><span class="hi-no">#${h.length - i}</span><span class="hi-time">${d.getMonth() + 1}/${d.getDate()} ${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}</span><button class="hi-del" data-hdel="${e.id}" title="삭제">✕</button></div>
+          <div class="hi-money">${fmtWon(bm.monthly)} <small>${Math.round(bm.rate * 100)}%</small></div>
+          <div class="hi-jobs">${best.jobIds.map(id => { const j = JOBS.find(x => x.id === id); return j ? `<span style="border-left:3px solid ${CATEGORY_COLORS[j.category]}">${esc(j.company)}</span>` : ''; }).join('')}</div>
+          <div class="hi-cond">${e.search.count}개 · ${PRIO[e.search.priority] || ''} 우선 · ${e.search.categories.length ? e.search.categories.length + '개 카테고리' : '전체'}${(e.pinned || []).length ? ' · 📌' + e.pinned.length : ''}${(e.excluded || []).length ? ' · ✕' + e.excluded.length : ''}</div>
+        </div>`; }).join('') : '<div class="hist-empty">아직 기록이 없습니다.<br>추천을 생성하면 여기에 쌓입니다.</div>'}
+    </aside>`;
+  };
+  const bindSidebar = () => {
+    document.querySelectorAll('.hist-item').forEach(el => el.onclick = e => {
+      if (e.target.closest('[data-hdel]')) return;
+      const entry = history().find(x => x.id === el.dataset.hid); if (!entry) return;
+      st = fromHistory(entry); Session.set(st); draw();
+    });
+    document.querySelectorAll('[data-hdel]').forEach(b => b.onclick = e => {
+      e.stopPropagation();
+      const id = b.dataset.hdel; const rest = history().filter(x => x.id !== id); Store.set('history', rest);
+      if (st.historyId === id) { if (rest.length) { st = fromHistory(rest[0]); Session.set(st); draw(); } else { sessionStorage.removeItem('result'); navigate('/'); } }
+      else draw();
+    });
+    const clr = $('#hist-clear'); if (clr) clr.onclick = () => { Store.set('history', []); st.historyId = null; draw(); toast('기록을 모두 지웠습니다.'); };
+  };
 
   const draw = () => {
     if (!st.plans.length) {
-      app().innerHTML = `<div class="page-head"><h1>조합을 만들 수 없습니다</h1></div>
+      app().innerHTML = `<div class="result-layout">${sidebar()}<div><div class="page-head"><h1>조합을 만들 수 없습니다</h1></div>
         <div class="card empty"><div class="ic">🧩</div>고정 목록·제외 목록 조건에서 겹치지 않는 조합이 없습니다.<br><br>
-        <button class="btn" id="reset">고정·제외 초기화</button> <a class="btn ghost" href="#/">조건 다시 설정</a></div>`;
+        <button class="btn" id="reset">고정·제외 초기화</button> <a class="btn ghost" href="#/">조건 다시 설정</a></div></div></div>`;
       $('#reset').onclick = () => { st.pinned = []; st.excluded = []; Session.set(st); run(); };
+      bindSidebar();
       return;
     }
     const sel = st.plans[st.selected];
     const jobs = planJobs(sel);
     const m = comboMetrics(jobs, profile);
-    const KIND = { income: '수입 최대안', ease: '여유 우선안', balance: '밸런스안' };
+    const hIdx = history().findIndex(x => x.id === st.historyId);
+    const hNo = hIdx >= 0 ? history().length - hIdx : null;
 
-    app().innerHTML = `
-      <div class="page-head"><div class="eyebrow">Result · 후보 ${candidates.length}건 중 조합</div><h1>추천 조합 3안</h1><p>카드를 눌러 비교하고, 마음에 드는 안을 시간표로 확인하세요.</p></div>
+    app().innerHTML = `<div class="result-layout">${sidebar()}<div>
+      <div class="page-head"><div class="eyebrow">Result${hNo ? ' · 기록 #' + hNo : ''} · 후보 ${candidates.length}건 중 조합</div><h1>추천 조합 ${st.plans.length}안</h1><p>카드를 눌러 비교하고, 마음에 드는 안을 시간표로 확인하세요.</p></div>
       <div class="grid-3">
         ${st.plans.map((p, i) => { const pm = p.metrics; return `
           <div class="card plan-card ${p.kind} ${i === st.selected ? 'on' : ''}" data-i="${i}">
@@ -321,8 +368,10 @@ function viewResult() {
       <div class="card">
         <div class="card-title">알바 상세 <span class="hint">📌 고정: 이 알바는 유지하고 나머지만 재생성 · ✕ 제외: 빼고 다시</span></div>
         ${jobs.map(j => jobItem(j, profile, { pinned: st.pinned.includes(j.id), controls: 'result' })).join('')}
-      </div>`;
+      </div>
+    </div></div>`;
 
+    bindSidebar();
     document.querySelectorAll('.plan-card').forEach(c => c.onclick = () => { st.selected = +c.dataset.i; Session.set(st); draw(); });
     $('#regen').onclick = () => run();
     $('#save').onclick = () => saveDialog(jobs, sel.kind);
