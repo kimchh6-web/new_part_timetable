@@ -1,0 +1,396 @@
+/* =====================================================================
+ * tests/ui_flow/app-flow.test.js
+ *
+ * 실행: node --test tests/ui_flow/*.test.js
+ *
+ * 대상: js/app.js — 화면 흐름(라우팅 → 요청 → 렌더 → 저장 → 재생성 → 실패).
+ * tests/web-api-client.test.js 가 덮는 어댑터 단위 규칙은 여기서 다시
+ * 검증하지 않는다. 여기서 보는 것은 "앱이 그 어댑터를 어떻게 쓰는가" 다.
+ *
+ * 브라우저 커넥터를 쓸 수 없는 환경이라 렌더된 GUI 증거(스크린샷)는 없다.
+ * 대신 실제 app.js 를 node:vm 에 올려 실제 DOM 문자열과 실제 핸들러를
+ * 실행하고, 그 결과 HTML 과 나간 요청 본문을 검증한다.
+ *
+ * 네트워크: support/page.js 의 fetch 대역이 상대경로 외의 주소를 막고,
+ * 테스트가 응답을 큐에 넣지 않으면 호출 자체를 실패시킨다.
+ * ===================================================================*/
+'use strict';
+
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const { createPage } = require('./support/page.js');
+const F = require('./support/fixtures.js');
+
+/** app.js 의 비동기 run() 이 끝날 때까지 마이크로태스크를 흘린다. */
+const flush = async (n = 3) => { for (let i = 0; i < n; i++) await new Promise(r => setImmediate(r)); };
+
+/** 프로필이 저장된 상태로 홈까지 띄운다. */
+function bootHome(extraSeed = {}) {
+  const page = createPage();
+  page.seed('profile', F.profileFixture());
+  for (const [k, v] of Object.entries(extraSeed)) page.seed(k, v);
+  page.boot();
+  return page;
+}
+
+/** 결과/저장 화면의 지표 줄에서 한 칸의 값을 읽는다. */
+function metricValue(page, label) {
+  const cell = page.$$('.metrics-row .metric').find(m => {
+    const k = m.querySelector('.k');
+    return k && k.textContent.startsWith(label);
+  });
+  assert.ok(cell, '지표 칸을 찾지 못했다: ' + label);
+  return cell.querySelector('.v').textContent;
+}
+
+/** 홈에서 조건을 고르고 추천을 생성한다. */
+async function generate(page, response) {
+  if (response !== undefined) page.queueJson(response);
+  page.click('#go');
+  await flush();
+}
+
+/* =====================================================================
+ * 1. 성공 응답 — 서버가 준 지표와 배정 근무를 그대로 그린다
+ * ===================================================================*/
+test('성공 흐름: 홈에서 고른 조건이 계약 Request 로 나가고 상대경로로만 호출한다', async () => {
+  const page = bootHome();
+
+  page.clickEl(page.$$('#cats .chip')[0]);      // 카페·음식점
+  page.clickEl(page.$$('#prio button')[1]);     // 거리
+  page.clickEl(page.$$('#count button')[2]);    // 3개
+
+  await generate(page, F.responseFixture());
+
+  assert.equal(page.calls.length, 1);
+  const call = page.calls[0];
+  assert.equal(call.url, page.evalIn('WeeklyApi.ENDPOINT'));
+  assert.equal(call.url, '/api/recommendations');
+  assert.equal(call.method, 'POST');
+  assert.deepEqual(call.body.search, { jobCount: 3, categories: ['카페·음식점'], priority: 'distance' });
+  assert.equal(call.body.profile.targetAmount, 600000);
+  assert.deepEqual(call.body.profile.fixedSchedules.map(f => f.day), ['MON', 'TUE', 'THU']);
+  assert.equal(call.body.regenerate, undefined, '첫 요청에는 regenerate 가 붙지 않아야 한다');
+
+  assert.equal(page.hash(), '#/result');
+  assert.equal(page.$$('.plan-card').length, 3);
+});
+
+test('성공 흐름: 월 수입·달성률·주 근무는 서버 값 그대로다 (프론트가 다시 계산하지 않는다)', async () => {
+  const page = bootHome();
+  await generate(page, F.responseFixture());
+  const html = page.html();
+
+  // 픽스처의 배정 근무 합계는 주 11시간이지만 서버는 28 을 줬다.
+  assert.match(html, /1,734,792원/);
+  assert.match(html, /289%/);
+  assert.match(html, /28\.0h/);
+  assert.ok(!html.includes('11.0h'), '배정 근무 산술(11h)로 서버 지표를 덮어쓰면 안 된다');
+  assert.match(html, /8시간 48분/);                 // weeklyTravelMinutes 528
+  assert.match(html, /10,963원/);                   // effectiveHourlyWage
+  assert.match(html, /주휴수당 미포함/);            // weeklyHolidayPayIncluded false
+  assert.match(html, /후보 187건/);                 // candidateCount
+  assert.match(html, /req_UIFLOW_0001/);
+});
+
+test('성공 흐름: 시간표는 서버 assignedShifts 와 서버 이동시간만 쓴다', async () => {
+  const page = bootHome();
+  await generate(page, F.responseFixture());
+
+  const cols = page.$$('.tt-col');
+  assert.equal(cols.length, 7);
+  const [mon, tue, wed, thu, fri, sat, sun] = cols.map(c => c.textContent);
+
+  assert.ok(mon.includes('치킨하우스 반반 노원점') && mon.includes('19:00–22:00'));
+  assert.ok(thu.includes('치킨하우스 반반 노원점'));
+  assert.ok(sat.includes('올리브영 여의도점') && sat.includes('10:00–15:00'));
+
+  // 서버가 배정하지 않은 요일에 근무를 만들어 내지 않는다 (고정 일정만 남는다)
+  assert.ok(!tue.includes('치킨하우스') && !tue.includes('올리브영'));
+  for (const empty of [wed, fri, sun]) assert.equal(empty.trim(), '');
+
+  // 이동시간은 서버 travel(30+13분) 을 쓰고, 브라우저 추정으로 넘어가지 않는다
+  const html = page.html();
+  assert.match(html, /이동 43분/);
+  assert.match(html, /서버 계산 이동시간/);
+  assert.ok(!html.includes('브라우저 추정 이동시간'), '서버가 travel 을 준 경우 추정 표기가 붙으면 안 된다');
+  assert.match(html, /18:02 출발/);                 // departAt
+  assert.match(html, /서버가 계산한 빈 시간/);      // availableSlots
+});
+
+test('성공 흐름: 서버가 주지 않은 지표는 만들어 내지 않고 —  로 둔다', async () => {
+  const page = bootHome();
+  await generate(page, F.responseFixture());
+
+  page.clickEl(page.$$('.plan-card')[2]);           // balanced — effectiveHourlyWage 없음
+  assert.match(page.html(), /밸런스안 주간 시간표/);
+
+  assert.equal(metricValue(page, '예상 월 수입'), '1,210,500원');
+  assert.equal(metricValue(page, '목표 달성률'), '201%');
+  assert.equal(metricValue(page, '주 총 근무시간'), '20.0h');
+  assert.equal(metricValue(page, '실질 시급'), '—', '서버가 안 준 실질 시급을 계산해 채우면 안 된다');
+  assert.match(page.html(), /주휴수당 여부 미확인/);
+});
+
+/* =====================================================================
+ * 2. 저장 → 재열람 — 서버 plan 이 보존된다
+ * ===================================================================*/
+test('저장 흐름: 저장하면 서버 plan 이 schemaVersion 2 로 그대로 보관된다', async () => {
+  const page = bootHome();
+  await generate(page, F.responseFixture());
+
+  page.click('#save');
+  assert.ok(page.$('#modalbg'), '저장 모달이 떠야 한다');
+  page.click('#mok');
+  await flush();
+
+  const saved = page.stored('schedules');
+  assert.equal(saved.length, 1);
+  const entry = saved[0];
+  assert.equal(entry.schemaVersion, 2);
+  assert.equal(entry.planId, 'plan_max_income_66489241');
+  assert.equal(entry.planType, 'maxIncome');
+  assert.equal(entry.requestId, 'req_UIFLOW_0001');
+  assert.equal(entry.source, 'llm');
+  assert.deepEqual(entry.metrics, F.responseFixture().plans[0].metrics);
+  assert.deepEqual(entry.jobs.map(j => j.jobId), ['job_cp0095', 'job_st0042']);
+  assert.deepEqual(entry.jobs[0].assignedShifts, F.jobA().assignedShifts);
+  assert.equal(page.hash(), '#/schedule/' + entry.id);
+  assert.ok(!page.$('#modalbg'), '저장 후 모달이 닫혀야 한다');
+});
+
+test('저장 흐름: 새 세션에서 다시 열어도 서버 지표와 배정 시간이 그대로다', async () => {
+  const first = bootHome();
+  await generate(first, F.responseFixture());
+  first.click('#save');
+  first.click('#mok');
+  await flush();
+  const saved = first.stored('schedules');
+
+  // 같은 저장물을 가진 완전히 새 세션 (sessionStorage 는 비어 있다)
+  const reopened = createPage();
+  reopened.seed('profile', F.profileFixture());
+  reopened.seed('schedules', saved);
+  reopened.location._hash = '#/schedule/' + saved[0].id;
+  reopened.boot();
+
+  const html = reopened.html();
+  assert.match(html, /1,734,792원/);
+  assert.match(html, /289%/);
+  assert.match(html, /28\.0h/);
+  assert.match(html, /치킨하우스 반반 노원점/);
+  assert.match(html, /19:00 ~ 22:00/);
+  assert.match(html, /18:02 출발/);
+  assert.ok(!html.includes('이전 버전에서 저장된'), '서버 기반 저장물을 옛 형식으로 취급하면 안 된다');
+  assert.equal(reopened.calls.length, 0, '저장된 시간표를 여는 데 네트워크가 필요하면 안 된다');
+});
+
+/* =====================================================================
+ * 3. 고정·제외 재생성 — 정확한 id 가 실린다
+ * ===================================================================*/
+test('재생성 흐름: 고정한 알바 id 와 이미 본 plan id 가 정확히 실린다', async () => {
+  const page = bootHome();
+  await generate(page, F.responseFixture());
+
+  const pinButtons = page.$$('[data-pin]');
+  assert.deepEqual(pinButtons.map(b => b.dataset.pin), ['job_cp0095', 'job_st0042']);
+  page.clickEl(pinButtons[0]);
+  assert.match(page.html(), /고정 1 · 제외 0/);
+
+  page.queueJson(F.responseFixture({ requestId: 'req_UIFLOW_0002' }));
+  page.click('#regen');
+  await flush();
+
+  assert.equal(page.calls.length, 2);
+  assert.deepEqual(page.calls[1].body.regenerate, {
+    pinnedJobIds: ['job_cp0095'],
+    excludedJobIds: [],
+    previousPlanHashes: ['plan_max_income_66489241', 'plan_min_travel_1197a3c0', 'plan_balanced_5d20e4b1'],
+  });
+  assert.deepEqual(page.calls[1].body.search, page.calls[0].body.search, '재생성은 탐색 조건을 바꾸지 않는다');
+});
+
+test('재생성 흐름: 제외는 고정에서 빼고 excludedJobIds 로 나간다', async () => {
+  const page = bootHome();
+  await generate(page, F.responseFixture());
+
+  page.clickEl(page.$$('[data-pin]')[0]);                      // job_cp0095 고정
+  page.queueJson(F.responseFixture({ requestId: 'req_UIFLOW_0002' }));
+  page.click('#regen');
+  await flush();
+
+  page.queueJson(F.responseFixture({ requestId: 'req_UIFLOW_0003' }));
+  page.clickEl(page.$$('[data-exclude]')[0]);                  // job_cp0095 제외
+  await flush();
+
+  assert.equal(page.calls.length, 3);
+  const regen = page.calls[2].body.regenerate;
+  assert.deepEqual(regen.excludedJobIds, ['job_cp0095']);
+  assert.deepEqual(regen.pinnedJobIds, [], '제외한 알바는 고정 목록에서 빠져야 한다');
+  assert.ok(regen.previousPlanHashes.includes('plan_max_income_66489241'));
+});
+
+/* =====================================================================
+ * 4. 실패 — 입력을 지우지 않고, 로컬 JOBS 로 몰래 대체하지 않는다
+ * ===================================================================*/
+test('실패 흐름: HTTP 5xx 는 입력을 유지하고 재시도를 제공하며 로컬 공고로 대체하지 않는다', async () => {
+  const page = bootHome();
+  page.clickEl(page.$$('#cats .chip')[0]);
+  page.clickEl(page.$$('#count button')[2]);
+  const chosen = page.stored('lastSearch');
+
+  page.queueJson(F.errorBody('SERVER_ERROR', '일시적인 서버 오류입니다.'), { status: 503 });
+  page.click('#go');
+  await flush();
+
+  const html = page.html();
+  assert.match(html, /추천을 받지 못했습니다/);
+  assert.match(html, /SERVER_ERROR/);
+  assert.ok(page.$('#retry'), '재시도 버튼이 있어야 한다');
+  assert.equal(page.$$('.plan-card').length, 0);
+
+  // js/data.js 의 손으로 만든 JOBS 가 화면에 새어 나오면 안 된다
+  const localCompanies = [...new Set(page.evalIn('JOBS.map(j => j.company)'))];
+  const leaked = localCompanies.filter(c => html.includes(c));
+  assert.deepEqual(leaked, [], '서버 실패 시 로컬 JOBS 로 결과를 지어내면 안 된다');
+
+  // 입력은 그대로 남는다
+  assert.deepEqual(page.stored('lastSearch'), chosen);
+  assert.deepEqual(page.session().search, chosen);
+  assert.equal(page.session().error.code, 'SERVER_ERROR');
+  assert.deepEqual(page.stored('history'), null, '실패한 요청은 기록에 남기지 않는다');
+});
+
+test('실패 흐름: 네트워크 자체가 끊겨도 같은 자리를 지킨다', async () => {
+  const page = bootHome();
+  page.queueFailure(new TypeError('fetch failed'));
+  page.click('#go');
+  await flush();
+
+  const html = page.html();
+  assert.equal(page.session().error.code, 'NETWORK');
+  assert.match(html, /로컬 예시 데이터로 결과를 지어내지 않기/);
+  assert.match(html, /\/api\/recommendations/);
+  assert.equal(page.$$('.plan-card').length, 0);
+  assert.ok(page.$('#retry'));
+});
+
+test('실패 흐름: 재시도는 같은 조건을 그대로 다시 보낸다', async () => {
+  const page = bootHome();
+  page.clickEl(page.$$('#prio button')[2]);        // 평점
+  page.queueJson(F.errorBody('SERVER_ERROR', '일시적인 서버 오류입니다.'), { status: 503 });
+  page.click('#go');
+  await flush();
+
+  page.queueJson(F.responseFixture());
+  page.click('#retry');
+  await flush();
+
+  assert.equal(page.calls.length, 2);
+  assert.deepEqual(page.calls[1].body, page.calls[0].body);
+  assert.match(page.html(), /1,734,792원/);
+  assert.equal(page.$$('.plan-card').length, 3);
+});
+
+/* =====================================================================
+ * 5. 옛 저장물 — 조용히 부수지 않는다
+ * ===================================================================*/
+test('옛 저장물: schemaVersion 1 스케줄은 경고와 함께 원본 그대로 열린다', () => {
+  const page = bootHome({ schedules: [F.legacySchedule()] });
+
+  page.go('#/my');
+  assert.match(page.html(), /이전 형식/);
+  assert.match(page.html(), /5월 수입 최대안/);
+
+  page.go('#/schedule/s_legacy_1');
+  const html = page.html();
+  assert.match(html, /이전 버전에서 저장된 시간표입니다/);
+  assert.match(html, /옛날카페 신촌점/);
+  assert.match(html, /18:00 ~ 22:00/);
+  assert.match(html, /010-0000-9999/);
+  assert.deepEqual(page.stored('schedules'), [F.legacySchedule()], '열어 보기만 해도 저장물이 바뀌면 안 된다');
+});
+
+test('옛 저장물: 새로 추천받고 저장해도 옛 기록·스케줄이 살아 있다', async () => {
+  const page = bootHome({ schedules: [F.legacySchedule()], history: [F.legacyHistoryEntry()] });
+
+  // 쓸 수 있는 기록이 없으면 결과 화면은 홈으로 되돌린다 (옛 기록을 억지로 열지 않는다)
+  page.go('#/result');
+  assert.equal(page.hash(), '#/');
+
+  await generate(page, F.responseFixture());
+
+  // 사이드바에서 옛 기록은 "다시 열 수 없음" 으로만 표시되고 사라지지 않는다
+  assert.equal(page.$$('[data-hlegacy]').length, 1);
+  assert.equal(page.$$('[data-hid]').length, 1);
+  page.clickEl(page.$('[data-hlegacy]'));
+  assert.equal(page.toasts.at(-1), '예전 형식 기록입니다. 조건을 확인하고 새로 추천받아 주세요.');
+
+  page.click('#save');
+  page.click('#mok');
+  await flush();
+
+  const schedules = page.stored('schedules');
+  assert.equal(schedules.length, 2);
+  assert.deepEqual(schedules.find(s => s.id === 's_legacy_1'), F.legacySchedule());
+
+  const history = page.stored('history');
+  assert.equal(history.length, 2);
+  // 옛 기록에는 schemaVersion 표식만 붙고 내용은 손대지 않는다
+  assert.deepEqual(history.find(e => e.id === 'h_legacy_1'), { ...F.legacyHistoryEntry(), schemaVersion: 1 });
+});
+
+test('옛 저장물: 옛 형식 스케줄을 수정해 저장해도 옛 형식 그대로 남는다', () => {
+  const page = bootHome({ schedules: [F.legacySchedule()] });
+  page.go('#/schedule/s_legacy_1');
+
+  page.click('#edit');
+  const inputs = page.$$('input[data-shift]');
+  assert.deepEqual(inputs.map(i => i.dataset.shift), [
+    'old_job_1:0:start', 'old_job_1:0:end', 'old_job_1:1:start', 'old_job_1:1:end',
+  ]);
+  page.change(inputs[1], '23:00');                  // 수 종료 22:00 → 23:00
+  assert.ok(page.$('#savechg') && !page.$('#savechg').disabled);
+  page.click('#savechg');
+
+  const saved = page.stored('schedules')[0];
+  assert.equal(saved.schemaVersion, undefined, '옛 형식을 v2 로 승격해 버리면 안 된다');
+  assert.ok(!('assignedShifts' in saved.jobs[0]), '옛 jobs 에 서버 필드를 끼워 넣지 않는다');
+  assert.deepEqual(saved.jobs[0].shifts, [
+    { day: 'WED', start: '18:00', end: '23:00' },
+    { day: 'FRI', start: '18:00', end: '22:00' },
+  ]);
+  assert.deepEqual(saved.jobs[0].contact, F.legacySchedule().jobs[0].contact);
+  assert.equal(saved.jobs[0].description, F.legacySchedule().jobs[0].description);
+  assert.equal(page.toasts.at(-1), '변경사항을 저장했습니다.');
+});
+
+/* =====================================================================
+ * 6. /live 라우트 위임
+ * ===================================================================*/
+test('/live: 프로필이 없어도 온보딩으로 가로채지 않고 라이브 화면에 위임한다', () => {
+  const page = createPage();
+  page.location._hash = '#/live';
+  page.boot();
+
+  assert.equal(page.stored('profile'), null);
+  const html = page.html();
+  assert.match(html, /Daytona Execution Plane/);
+  assert.ok(page.$('#live-run'));
+  assert.ok(!html.includes('Onboarding'), '/live 는 온보딩 게이트보다 먼저 처리되어야 한다');
+  assert.ok(!html.includes('추천 조합 생성하기'));
+  assert.equal(page.calls.length, 0, '화면을 여는 것만으로 네트워크에 나가면 안 된다');
+});
+
+test('/live: 주간 추천 화면을 대체하지 않는다 (해시를 되돌리면 홈으로 복귀)', () => {
+  const page = bootHome();
+  assert.match(page.html(), /추천 조합 생성하기/);
+
+  page.go('#/live');
+  assert.match(page.html(), /Daytona Execution Plane/);
+  assert.ok(!page.html().includes('추천 조합 생성하기'));
+
+  page.go('#/');
+  assert.match(page.html(), /추천 조합 생성하기/);
+  assert.ok(!page.html().includes('Daytona Execution Plane'));
+});
