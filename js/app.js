@@ -606,6 +606,7 @@ function viewResult() {
 
     st.selected = Math.min(st.selected || 0, resp.plans.length - 1);
     const sel = resp.plans[st.selected];
+    const reasonOrigin = reasonOriginLabel(resp.source, resp.llm);
     const jobs = sel.jobs.map(toViewJob);
     const vp = viewProfile();
     // 이 결과를 받은 뒤 내 정보가 바뀌었는가. 당시 값이 아예 없는 옛 기록은
@@ -624,8 +625,7 @@ function viewResult() {
         <p>카드를 눌러 비교하고, 마음에 드는 안을 시간표로 확인하세요.</p>
       </div>
       ${sourceNotice(resp.jobSource)}
-      ${resp.source === 'fallback' ? '<div style="height:10px"></div><div class="note warn">LLM 대신 서버 계산 규칙으로 만든 조합입니다. 추천 사유 문구가 단순할 수 있습니다.</div>' : ''}
-      ${resp.source === null ? '<div style="height:10px"></div><div class="note warn">서버가 생성 방식(source)을 밝히지 않았습니다.</div>' : ''}
+      <div style="height:10px"></div>${llmNotice(resp.source, resp.llm)}
       ${resp.droppedPlans ? `<div style="height:10px"></div><div class="note warn">응답 중 ${resp.droppedPlans}개 안은 형식이 맞지 않아 표시하지 않았습니다.</div>` : ''}
       ${profileDrift ? `<div style="height:10px"></div><div class="note warn profile-drift" role="note">${st.profile
         ? '<b>지금의 내 정보와 다른 조건으로 받은 결과입니다.</b> 아래 시간표의 고정 일정·목표 금액은 이 결과를 받을 당시 값입니다.'
@@ -650,7 +650,7 @@ function viewResult() {
               <div class="mm"><div class="k">실질 시급</div><div class="v">${pm.effectiveHourlyWage === null ? '—' : Math.round(pm.effectiveHourlyWage).toLocaleString('ko-KR') + '원'}</div></div>
             </div>
             ${p.warnings.length ? `<div class="plan-warn">⚠ 확인할 사항 ${p.warnings.length}건</div>` : ''}
-            <div class="reason">${esc(p.reason)}</div>
+            <div class="reason"><span class="hint">${esc(reasonOrigin)}</span> ${esc(p.reason)}</div>
           </div>`; }).join('')}
       </div>
 
@@ -726,6 +726,9 @@ function viewResult() {
           profile: st.profile ? JSON.parse(JSON.stringify(st.profile)) : null,
           profileUnknown: !st.profile,
           source: st.response.source,
+          // 생성 방식 표시는 저장물에도 남긴다. 다시 열었을 때 같은 말을 해야 하고,
+          // 없으면 null 로 남겨 "확인 불가"로 읽힌다.
+          llm: st.response.llm ? JSON.parse(JSON.stringify(st.response.llm)) : null,
           jobSource: st.response.jobSource || null,
           requestId: st.response.requestId,
           generatedAt: st.response.generatedAt,
@@ -797,6 +800,7 @@ function viewSchedule(id) {
       <div class="page-head"><div class="eyebrow">Saved · ${new Date(sc.createdAt).toLocaleString('ko-KR')}</div><h1>${esc(sc.title)}</h1>
         <p>${profileHeadLine(profile, unknownProf)}${sc.planLabel ? ' · ' + esc(sc.planLabel) : ''}</p></div>
       ${sourceNotice(sc.jobSource || null)}
+      ${sc.source ? `<div style="height:10px"></div>${llmNotice(sc.source, sc.llm || null)}` : ''}
       ${unknownProf ? `<div style="height:12px"></div><div class="note warn profile-unknown" role="note"><b>이 시간표에는 추천 당시 내 정보가 남아 있지 않습니다.</b><br>
         당시 고정 일정·집 위치·목표 금액을 알 수 없어, 지금의 내 정보로 메우지 않고 비워 두었습니다. 지금 조건으로 받으려면 <a href="#/">새로 추천받기</a>를 눌러 주세요.</div>` : ''}
       ${legacy ? `<div style="height:12px"></div><div class="note warn" role="note"><b>이전 버전에서 저장된 시간표입니다.</b><br>
@@ -1007,7 +1011,79 @@ function profileHeadLine(profile, unknown) {
   return `${esc(profile.role)} · 집 ${esc(profile.home)} · 목표 ${fmtGoal(profile.goal)}`;
 }
 
+/* 바닥글의 한 낱말짜리 출처 표기. 기존 표기를 그대로 유지한다 — 자세한 구분은 아래 llmNotice() 가 한다. */
 const SOURCE_LABEL = { fallback: '서버 규칙 계산', llm: 'LLM' };
+
+/* =====================================================================
+ * 추천 사유를 만든 방식 — AI 평가인가, 서버 규칙인가
+ *
+ * 서버가 밝힌 값만 읽고, 하나라도 어긋나면 AI 평가라고 부르지 않는다.
+ *   - source=llm + llmUsed=true + llmStatus=success (engine 이 deterministic 이 아님)
+ *     → 검증된 AI 평가.
+ *   - source=llm 인데 위 표시가 빠졌거나 서로 어긋남 → "확인하지 못했다".
+ *   - source=fallback → 결정론적 계산. 사유를 아는 경우에만 사유를 말하고,
+ *     모르면 옛 응답과 같은 일반 문구를 그대로 쓴다(없는 이유를 지어내지 않는다).
+ * 제공자 오류 원문은 어떤 경우에도 화면에 그리지 않는다 — 고정 문구만 쓴다.
+ * ===================================================================*/
+const LLM_FALLBACK_REASON = {
+  not_configured: '이 서버에 LLM 모델이 설정되어 있지 않아 AI 평가를 생략했습니다.',
+  timeout: 'LLM이 제한 시간 안에 답하지 않아 AI 평가를 쓰지 않았습니다.',
+  provider_error: 'LLM 제공자에 연결하지 못해 AI 평가를 쓰지 않았습니다.',
+  invalid_response: 'LLM 응답이 형식 검증을 통과하지 못해 AI 평가를 쓰지 않았습니다.',
+  // 요청에 남은 처리 시간 예산을 말한다. 크레딧·토큰 할당량이 아니다.
+  budget_exhausted: '남은 처리 시간이 부족해 AI 평가를 생략했습니다.',
+};
+
+/* 저장된 스냅샷에도 같은 판정을 쓰기 위해, 기록된 플래그를 믿지 않고 원래 값에서 다시 판정한다. */
+function llmState(source, llm) {
+  const v = llm && typeof llm === 'object' ? llm : {};
+  const claimed = source === 'llm';
+  const verified = claimed && v.used === true && v.status === 'success' && v.engine !== 'deterministic';
+  return { v, claimed, verified };
+}
+
+function llmRunLine(v) {
+  const parts = [];
+  if (v.provider) parts.push(`제공자 ${esc(v.provider)}`);
+  if (v.model) parts.push(`모델 ${esc(v.model)}`);
+  if (typeof v.latencyMs === 'number' && Number.isFinite(v.latencyMs)) {
+    parts.push(`응답 ${Math.round(v.latencyMs).toLocaleString('ko-KR')}ms`);
+  }
+  return parts.length ? `<br><span class="hint">${parts.join(' · ')}</span>` : '';
+}
+
+function llmNotice(source, llm) {
+  const { v, claimed, verified } = llmState(source, llm);
+  if (verified) {
+    return `<div class="note info llm-note verified" role="note">
+      <b>AI가 적합도와 추천 사유를 평가했습니다.</b> 시간표·이동·수입은 서버 코드가 검증한 값입니다.${llmRunLine(v)}
+    </div>`;
+  }
+  if (claimed) {
+    return `<div class="note warn llm-note unverified" role="note">
+      <b>AI 사용 여부를 확인하지 못했습니다.</b> 서버는 LLM으로 만들었다고 밝혔지만, 확인에 필요한 표시(llmUsed·llmStatus)가 빠졌거나 서로 맞지 않습니다. 이 화면은 AI가 평가했다고 단정하지 않습니다.
+    </div>`;
+  }
+  if (source === 'fallback') {
+    const reason = LLM_FALLBACK_REASON[v.status];
+    // fallback 이라면서 llmUsed=true 를 함께 보내면 그 사유도 믿을 수 없다 — 일반 문구로 돌아간다.
+    return `<div class="note warn llm-note fallback" role="note">
+      ${reason && v.used !== true
+        ? `<b>서버 계산 규칙으로 만든 조합입니다.</b> ${reason} 추천 사유는 코드가 만든 고정 문구입니다.`
+        : 'LLM 대신 서버 계산 규칙으로 만든 조합입니다. 추천 사유 문구가 단순할 수 있습니다.'}
+    </div>`;
+  }
+  return `<div class="note warn llm-note unknown" role="note">서버가 생성 방식(source)을 밝히지 않았습니다.</div>`;
+}
+
+/* 추천 사유 한 줄이 누구 말인지 — 카드마다 붙는다. */
+function reasonOriginLabel(source, llm) {
+  const { claimed, verified } = llmState(source, llm);
+  if (verified) return 'AI 사유';
+  if (claimed) return '사유 출처 확인 불가';
+  if (source === 'fallback') return '규칙 사유';
+  return '사유 출처 미상';
+}
 
 /* 서버가 스스로 밝힌 한계(이동시간 추정 방식 · 주휴수당 미포함 등)를 그대로 보여준다. */
 function disclosureBlock(list) {
@@ -1227,6 +1303,7 @@ if (typeof module === 'object' && module.exports) {
     toViewJob, toViewJobLegacy, toStorageJob, localWeekly, renderTimetable, jobItem,
     warningBlock, metricsRowServer, slotsCard, buildDayTimeline, syntheticNotice,
     sourceNotice, sourceCountLine,
+    llmNotice, llmState, reasonOriginLabel,
     disclosureBlock, shiftTravelMinutes, safeProfile,
     regeneratePayload, togglePin, excludeJob, mergeSeenPlanIds, MAX_SEEN_PLAN_IDS,
   };

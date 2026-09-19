@@ -359,6 +359,49 @@
     };
   }
 
+  /* ---------------------------------------------------------------------
+   * 추천 사유를 만든 방식 — LLM 인가, 서버 규칙인가.
+   *
+   * 서버가 추가로 내려보내는 값만 옮긴다(가산적 metadata). 모르는 값은 null 로
+   * 두고, 화면이 "확인하지 못했다"고 말한다. 여기서 기본값을 채우면
+   * 결정론적 계산 결과에 AI 가 평가했다는 이름표가 붙는다.
+   *
+   * 성공은 서버가 스스로 성공이라고 밝힌 한 가지 모양만 인정한다:
+   *   source=llm + llmUsed=true + llmStatus=success (+ engine 이 deterministic 이 아님).
+   * 하나라도 어긋나면 claimed(서버 주장)일 뿐 verified 가 아니다.
+   * ------------------------------------------------------------------*/
+  const LLM_ENGINES = new Set(['hybrid', 'deterministic']);
+  const LLM_PROVIDERS = new Set(['nosana', 'openai']);
+  /* fallback 사유. 서버가 준 enum 만 쓰고, 자유 문장은 쓰지 않는다(그대로 그리면
+   * 제공자 오류 원문이 화면에 노출될 수 있다). */
+  const LLM_FALLBACK_STATUSES = new Set(['not_configured', 'timeout', 'provider_error', 'invalid_response', 'budget_exhausted']);
+  const MAX_MODEL_LEN = 60;
+
+  function adaptLlm(meta) {
+    const m = isObj(meta) ? meta : null;
+    const latency = m ? num(m.llmLatencyMs) : null;
+    const model = m ? str(m.llmModel).trim().slice(0, MAX_MODEL_LEN) : '';
+    const status = m && (m.llmStatus === 'success' || LLM_FALLBACK_STATUSES.has(m.llmStatus)) ? m.llmStatus : null;
+    return {
+      engine: m && LLM_ENGINES.has(m.engine) ? m.engine : null,
+      used: m ? bool(m.llmUsed) : null,
+      provider: m && LLM_PROVIDERS.has(m.llmProvider) ? m.llmProvider : null,
+      model: model || null,
+      latencyMs: latency !== null && latency >= 0 ? latency : null,
+      status,
+    };
+  }
+
+  /** 서버가 밝힌 값들이 한 방향을 가리킬 때만 "AI 가 평가했다"고 인정한다. */
+  function llmVerdict(source, llm) {
+    const claimed = source === 'llm';
+    const verified = claimed
+      && llm.used === true
+      && llm.status === 'success'
+      && llm.engine !== 'deterministic';
+    return { ...llm, claimed, verified };
+  }
+
   function adaptResponse(raw) {
     if (!isObj(raw)) {
       throw new ApiClientError('MALFORMED_RESPONSE', '서버 응답을 읽을 수 없습니다.', { retryable: true });
@@ -385,6 +428,7 @@
       generatedAt: str(raw.generatedAt) || null,
       source,
       jobSource: adaptJobSource(meta),
+      llm: llmVerdict(source, adaptLlm(meta)),
       contractVersion: meta ? str(meta.contractVersion) || null : null,
       disclosures: meta ? arr(meta.disclosures).filter(d => typeof d === 'string' && d) : [],
       availableSlots: arr(raw.availableSlots).map(adaptSlot).filter(Boolean),
@@ -539,6 +583,6 @@
     postRecommendations,
     requestRecommendations,
     planIds,
-    _internals: { normTime, toMinutes, adaptPlan, adaptJob, adaptShift, adaptSlot, adaptTravel, adaptJobSource },
+    _internals: { normTime, toMinutes, adaptPlan, adaptJob, adaptShift, adaptSlot, adaptTravel, adaptJobSource, adaptLlm, llmVerdict },
   };
 });

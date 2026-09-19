@@ -12,6 +12,10 @@
 라이브 수집이 돌고 있다는 뜻이 아니다.
 `source`(`llm|fallback`)는 **추천을 만든 방식**이고, `meta.job_source`/`meta.data_mode`는
 **공고 데이터의 출처**다. 두 값은 서로 독립이다.
+주간 추천의 `source=llm`은 검증을 통과한 실제 LLM 호출에만 붙으며, 그 근거
+(`meta.engine`/`llmUsed`/`llmProvider`/`llmModel`/`llmLatencyMs`/`llmStatus`)와
+대체 사유 목록은 [주간 추천 계약](examples/WEEKLY_API.md)의 *생성 방식 공시*에 있다.
+일일 데모 계약은 이 필드들을 쓰지 않는다.
 일일 `availability` 입력과 주간 `profile/search/regenerate` 입력은 서로 대체할 수 없다.
 
 ## POST /api/demo/schedule

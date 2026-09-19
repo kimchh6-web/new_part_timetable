@@ -5,8 +5,9 @@
 공고 필터링, 배정 가능 시간, 조합과 수입 계산을 실행한다.
 브라우저는 서버의 배정 시간과 지표를 그대로 표시한다.
 
-현재 주간 추천은 항상 결정론적 코드이며 `source="fallback"`이다.
-LLM 연결 실패를 기다리지 않는다. Daytona 실패는 503이며 로컬 추천으로 위장하지 않는다.
+조합·시간표·수입은 언제나 Daytona 안의 결정론적 코드가 만든다. 그 뒤에 LLM 단계를
+붙이면 `source="llm"`, 붙이지 않거나 실패하면 `source="fallback"`이다(아래 *생성 방식 공시*).
+Daytona 실패는 503이며 로컬 추천으로 위장하지 않는다.
 기존 일일 데모(`/api/demo/schedule`, `/#/live`)는 별도 입력·출력 계약을 유지한다.
 
 ## 요청
@@ -52,6 +53,40 @@ LLM 연결 실패를 기다리지 않는다. Daytona 실패는 503이며 로컬 
 - meta.execution_proof: `sandbox_id`, `exit_code`(0만 성공으로 인정), `platform`, `python`,
   `cwd`, `command`, `remote_seconds`, `controller_seconds`. meta.trace는 같은 내용을 사람이
   읽는 순서로 남긴다. 이 값들은 sandbox가 보고한 관측값이며 컨트롤러가 채우지 않는다.
+
+## 생성 방식 공시 — `source` 와 `meta` 의 LLM 필드
+
+기존 필드는 그대로 두고 `meta`에만 값을 더한다(가산적). 화면은 여기 있는 값만 읽고,
+없으면 "확인하지 못함"으로 표시한다 — 빠진 값을 추측해 채우지 않는다.
+
+| 경우 | `source` | `meta.engine` | `meta.llmUsed` | `meta.llmStatus` |
+|---|---|---|---|---|
+| LLM 성공(검증 통과) | `llm` | `hybrid` | `true` | `success` |
+| 결정론적 대체 | `fallback` | `deterministic` | `false` | 아래 사유 중 하나 |
+
+성공일 때만 함께 싣는다: `meta.llmProvider`(`nosana` \| `openai`; 현재 구현·검증된 것은
+Nosana 하나다), `meta.llmModel`(모델 식별자 문자열), `meta.llmLatencyMs`(0 이상의 정수).
+
+`meta.llmStatus` 대체 사유:
+
+| 값 | 뜻 |
+|---|---|
+| `not_configured` | 이 서버에 LLM 모델 설정이 없다 |
+| `timeout` | LLM이 제한 시간 안에 답하지 않았다 |
+| `provider_error` | 제공자 호출이 실패했다 (원문 오류 메시지는 응답에 싣지 않는다) |
+| `invalid_response` | LLM 출력이 형식 검증을 통과하지 못했다 |
+| `budget_exhausted` | 요청에 남은 **처리 시간 예산**이 부족해 LLM 단계를 건너뛰었다 (크레딧·토큰 할당량이 아니다) |
+
+LLM 이 하는 일은 **결정론적 단계가 이미 만든 후보와 근거 중에서 적합도를 평가하고
+추천 사유 문장을 고르는 것**뿐이다. 자유 작문을 싣지 않고, 입력에 없는 자격·경력·스킬을
+추론하지 않으며, 근무 시간·이동 시간·수입 어느 숫자도 LLM 이 만들거나 바꾸지 않는다.
+`plans` 의 순서와 내용은 LLM 사용 여부와 무관하게 서버가 정한 그대로다.
+
+화면(`js/app.js`)은 `source=llm` + `llmUsed=true` + `llmStatus=success` 가 모두 맞고
+`engine` 이 `deterministic` 이 아닐 때만 "AI가 평가했다"고 말한다. 하나라도 빠지거나
+어긋나면 "확인하지 못했다"로 표시하고, `source=fallback` 은 아는 사유가 있을 때만
+그 사유를 밝힌다. 오래된 응답(이 필드들이 없는 응답)은 예전 문구 그대로 읽힌다.
+이 축은 공고 데이터의 출처(`meta.job_source` / `meta.data_mode`)와 독립이다.
 
 `monthlyIncome = 주급 합계 × 4.3`. `targetAchievementRate`는 비율(1 = 100%).
 `weeklyWorkHours`는 배정된 근무시간, `weeklyTravelMinutes`는 도보 포함 이동시간,
