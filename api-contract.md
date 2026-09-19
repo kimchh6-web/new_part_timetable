@@ -12,6 +12,11 @@
 `Content-Type: application/json; charset=utf-8`. 같은 origin의 로컬 웹 앱에서 사용.
 인증 키는 서버 환경변수에만 둔다. 본문 최대 16,384 bytes.
 
+Cloudflare Tunnel 공개 시 서버의 `HARNESS_PUBLIC_ORIGIN`에 발급된 HTTPS origin을
+설정하고 서버를 재시작한다. 지정된 origin과 localhost만 브라우저 POST를 허용한다.
+Quick Tunnel은 PC의 Python 서버에 연결하는 체험용 경로이며 영구 클라우드 호스팅이 아니다.
+PC, Python 서버, cloudflared 프로세스를 유지해야 한다. 동시 계획 요청은 BUSY로 응답할 수 있다.
+
 ```json
 {
   "start_location": "서울 강남",

@@ -1,5 +1,6 @@
 """Local web app + real Daytona scheduling endpoint: python web_demo.py."""
 import json
+import os
 import threading
 import time
 import uuid
@@ -16,6 +17,10 @@ ROOT = Path(__file__).resolve().parent
 RUNTIME = DaytonaScheduleExecutionRuntime()
 LOCK = threading.Lock()
 RESPONSE_TIMEOUT_SECONDS = 25
+ALLOWED_ORIGINS = {'http://127.0.0.1:5191', 'http://localhost:5191'}
+PUBLIC_ORIGIN = os.environ.get('HARNESS_PUBLIC_ORIGIN', '').rstrip('/')
+if PUBLIC_ORIGIN:
+    ALLOWED_ORIGINS.add(PUBLIC_ORIGIN)
 
 
 class Handler(SimpleHTTPRequestHandler):
@@ -60,7 +65,7 @@ class Handler(SimpleHTTPRequestHandler):
             return self._error(404, 'NOT_FOUND', '지원하지 않는 경로입니다.')
         # This local demo accepts only its own browser origin.
         origin = self.headers.get('Origin')
-        if origin and origin not in ('http://127.0.0.1:5191', 'http://localhost:5191'):
+        if origin and origin not in ALLOWED_ORIGINS:
             return self._error(403, 'ORIGIN_NOT_ALLOWED', '같은 웹 앱에서 요청해 주세요.')
         if self.headers.get_content_type() != 'application/json':
             return self._error(415, 'UNSUPPORTED_MEDIA_TYPE', 'Content-Type은 application/json이어야 합니다.')

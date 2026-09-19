@@ -31,9 +31,11 @@ class LiveApiTests(unittest.TestCase):
         cls.server.server_close()
         cls.thread.join()
 
-    def request(self, payload=None, raw=None, content_type='application/json'):
+    def request(self, payload=None, raw=None, content_type='application/json', origin=None):
         data = raw if raw is not None else json.dumps(self.payload if payload is None else payload).encode()
         req = Request(self.url, data=data, headers={'Content-Type': content_type})
+        if origin:
+            req.add_header('Origin', origin)
         try:
             response = urlopen(req, timeout=3)
         except HTTPError as exc:
@@ -70,6 +72,18 @@ class LiveApiTests(unittest.TestCase):
     def test_wrong_media_type(self):
         status, body = self.request(content_type='text/plain')
         self.assertEqual((status, body['error']['code']), (415, 'UNSUPPORTED_MEDIA_TYPE'))
+
+    def test_configured_public_origin_allowed(self):
+        origin = 'https://configured-demo.trycloudflare.com'
+        with patch.object(web_demo, 'ALLOWED_ORIGINS', {origin}), patch.object(web_demo, 'run_harness', return_value=copy.deepcopy(self.local_result)):
+            status, body = self.request(origin=origin)
+        self.assertEqual(status, 200)
+
+    def test_unknown_origin_rejected(self):
+        with patch.object(web_demo, 'run_harness') as run:
+            status, body = self.request(origin='https://unconfigured.example')
+            run.assert_not_called()
+        self.assertEqual((status, body['error']['code']), (403, 'ORIGIN_NOT_ALLOWED'))
 
     def test_nonfinite_json_rejected(self):
         status, body = self.request(raw=b'{"weekly_income_target":NaN}')
