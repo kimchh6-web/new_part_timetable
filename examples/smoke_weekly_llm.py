@@ -2,38 +2,24 @@
 
 Usage: python examples/smoke_weekly_llm.py --url http://127.0.0.1:5191
 
-Posts the canonical ``examples/weekly_input.json`` to a server that is already
-running with the LLM ranking core deployed, and refuses to pass unless the
-response itself says the answer came from the LLM on Nosana and executed on
-Daytona::
+Posts the canonical ``examples/weekly_input.json`` to a server already running
+the LLM ranking core, and refuses to pass unless the response itself says the
+answer came from the LLM on Nosana and executed on Daytona — the six facts in
+:data:`REQUIRED`. Only then is a baseline computed locally by the
+deterministic harness (:func:`build_weekly_recommendations` over
+:func:`load_jobs`). That local run is the **comparator only**: never the thing
+under test, and unable to make the script pass by itself, since the provenance
+gate runs first.
 
-    source == "llm"                      meta.llmUsed is True
-    meta.llmStatus == "success"          meta.llmProvider == "nosana"
-    meta.runtime_provider == "daytona"   meta.execution_ok is True
-
-The baseline is then computed locally by the deterministic harness
-(:func:`harness.weekly.build_weekly_recommendations` over :func:`load_jobs`).
-The local run is the **comparator only**. It is never the thing under test and
-it cannot make this script pass on its own: the live response must carry the
-metadata above before a single field is compared.
-
-What the comparison freezes, written out so the tolerances are explicit rather
-than implied:
-
-* ``candidateCount`` and ``availableSlots`` — deeply equal;
-* the set of ``(id, hash, type, label)`` over plans — equal, order free;
-* per plan, ``jobs`` (and therefore every ``assignedShifts`` entry and its
-  ``travel``), ``metrics`` and ``warnings`` — deeply equal, field for field.
-
-What the LLM is allowed to change:
-
-* the order of plans in the list;
-* each plan's ``reason``, which must still be a non-empty string;
-* new keys added **at the plan level** — a semantic fit score, say. Additions
-  *inside* jobs/metrics/warnings are mismatches, not additions.
-
-Exit status is 0 only when every check above holds. No API key, no config, and
-nothing written outside the git-ignored ``.runtime/`` (and only with --save).
+The comparison freezes ``candidateCount``, ``availableSlots``, the
+``(id, hash, type, label)`` set over plans, and per plan the ``jobs`` (each
+``assignedShifts`` entry and its ``travel`` included), ``metrics`` and
+``warnings`` — deeply equal, field for field. It allows the LLM to reorder
+plans, to rewrite each ``reason`` (which must stay non-empty), and to add new
+keys **at the plan level**, a semantic fit score say; an addition *inside*
+jobs/metrics/warnings is a mismatch, not an addition. Exit status is 0 only
+when every check holds. No API key, no config, and nothing written outside the
+git-ignored ``.runtime/`` (and only with --save).
 """
 from __future__ import annotations
 
@@ -65,7 +51,6 @@ REQUIRED = (
 
 #: Plan fields the LLM must not touch at all.
 FROZEN_PLAN_FIELDS = ("jobs", "metrics", "warnings")
-
 _MISSING = object()
 
 
@@ -84,14 +69,11 @@ def _equals(found, expected) -> bool:
     return found is expected if isinstance(expected, bool) else found == expected
 
 
-def _show(value) -> str:
-    return "<missing>" if value is _MISSING else repr(value)
-
-
 def check_provenance(live) -> list[str]:
     """Everything the response must claim for the comparison to be worth running."""
     return [
-        f"{path}: expected {expected!r}, got {_show(dig(live, path))}"
+        f"{path}: expected {expected!r}, got "
+        + ("<missing>" if dig(live, path) is _MISSING else repr(dig(live, path)))
         for path, expected in REQUIRED
         if not _equals(dig(live, path), expected)
     ]
@@ -101,10 +83,8 @@ def compare(baseline, live) -> list[str]:
     """Differences the LLM was not allowed to introduce. Empty list means pass."""
     problems: list[str] = []
     if live.get("candidateCount") != baseline["candidateCount"]:
-        problems.append(
-            f"candidateCount: deterministic {baseline['candidateCount']}, "
-            f"live {live.get('candidateCount')!r}"
-        )
+        problems.append(f"candidateCount: deterministic {baseline['candidateCount']}, "
+                        f"live {live.get('candidateCount')!r}")
     if live.get("availableSlots") != baseline["availableSlots"]:
         problems.append("availableSlots differ from the deterministic run")
 
@@ -122,11 +102,9 @@ def compare(baseline, live) -> list[str]:
         return {(p.get("id"), p.get("hash"), p.get("type"), p.get("label")) for p in plans}
 
     if identity(base_plans.values()) != identity(live_plans.values()):
-        problems.append(
-            "plan identity set (id/hash/type/label) changed: deterministic "
-            f"{sorted(p['type'] for p in base_plans.values())}, "
-            f"live {sorted(str(p.get('type')) for p in live_plans.values())}"
-        )
+        problems.append("plan identity set (id/hash/type/label) changed: deterministic "
+                        f"{sorted(p['type'] for p in base_plans.values())}, "
+                        f"live {sorted(str(p.get('type')) for p in live_plans.values())}")
 
     for plan_id, base in base_plans.items():
         plan = live_plans.get(plan_id)
@@ -142,11 +120,9 @@ def compare(baseline, live) -> list[str]:
 
 
 def post(url: str, payload, timeout: float):
-    request = Request(
-        url.rstrip("/") + "/api/recommendations",
-        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
-    )
+    request = Request(url.rstrip("/") + "/api/recommendations",
+                      data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+                      headers={"Content-Type": "application/json"})
     try:
         response = urlopen(request, timeout=timeout)
     except HTTPError as exc:
@@ -163,18 +139,15 @@ def _fail(problems) -> int:
 
 
 def _report(live, elapsed: float) -> None:
+    """Metadata and reasons only — never the postings or anyone's contact row."""
     meta = live.get("meta") or {}
     print("PASS weekly LLM proof")
-    print(
-        f"  source={live.get('source')} llmStatus={meta.get('llmStatus')} "
-        f"llmProvider={meta.get('llmProvider')} runtime={meta.get('runtime_provider')} "
-        f"execution_ok={meta.get('execution_ok')}"
-    )
-    print(
-        f"  jobs_loaded={meta.get('jobs_loaded')} candidateCount={live.get('candidateCount')} "
-        f"plans={len(live.get('plans') or [])} llmLatencyMs={meta.get('llmLatencyMs')} "
-        f"wall={elapsed:.2f}s"
-    )
+    print(f"  source={live.get('source')} llmStatus={meta.get('llmStatus')} "
+          f"llmProvider={meta.get('llmProvider')} runtime={meta.get('runtime_provider')} "
+          f"execution_ok={meta.get('execution_ok')}")
+    print(f"  jobs_loaded={meta.get('jobs_loaded')} candidateCount={live.get('candidateCount')} "
+          f"plans={len(live.get('plans') or [])} llmLatencyMs={meta.get('llmLatencyMs')} "
+          f"wall={elapsed:.2f}s")
     print("  deterministic jobs/metrics/warnings unchanged; plan order and reason free")
     for plan in live.get("plans") or []:
         print(f"  [{plan.get('type')}] {plan.get('id')} {plan.get('label')}")
@@ -185,11 +158,8 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--url", default="http://127.0.0.1:5191")
     parser.add_argument("--timeout", type=float, default=120.0)
-    parser.add_argument(
-        "--save",
-        action="store_true",
-        help="write the response to .runtime/weekly-llm-proof-response.json (git-ignored)",
-    )
+    parser.add_argument("--save", action="store_true",
+                        help="write the response under .runtime/ (git-ignored)")
     args = parser.parse_args(argv)
 
     payload = json.loads(PAYLOAD_PATH.read_text(encoding="utf-8"))
@@ -205,10 +175,8 @@ def main(argv=None) -> int:
         ARTIFACT_PATH.write_text(json.dumps(live, ensure_ascii=False, indent=2), encoding="utf-8")
         print("saved:", ARTIFACT_PATH)
     if status != 200 or not isinstance(live, dict):
-        return _fail([
-            f"HTTP {status}, expected 200",
-            f"body: {json.dumps(live, ensure_ascii=False)[:400]}",
-        ])
+        return _fail([f"HTTP {status}, expected 200",
+                      f"body: {json.dumps(live, ensure_ascii=False)[:400]}"])
 
     problems = check_provenance(live)
     if problems:
@@ -218,10 +186,8 @@ def main(argv=None) -> int:
     jobs = load_jobs()
     loaded = dig(live, "meta.jobs_loaded")
     if loaded is not _MISSING and loaded != len(jobs):
-        return _fail([
-            f"meta.jobs_loaded={loaded} but the local dataset has {len(jobs)} rows; "
-            "the comparison would not be like for like"
-        ])
+        return _fail([f"meta.jobs_loaded={loaded} but the local dataset has {len(jobs)} rows; "
+                      "the comparison would not be like for like"])
     problems = compare(build_weekly_recommendations(payload, jobs), live)
     if problems:
         return _fail(problems)
