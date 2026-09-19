@@ -329,6 +329,36 @@
    * 구조가 깨졌으면(plans 배열이 없거나 쓸 수 있는 안이 하나도 없으면)
    * MALFORMED_RESPONSE 로 던진다. 조용히 다른 데이터로 대체하지 않는다.
    */
+  /**
+   * 공고 데이터의 출처. 서버가 밝힌 것만 그대로 옮기고, 모르면 mode=null 로 둔다.
+   * 여기서 기본값을 'demo_json' 으로 채우면 실제 공고를 데모라고 부르게 되므로
+   * 절대 채우지 않는다.
+   */
+  const JOB_SOURCES = new Set(['demo_json', 'public_web']);
+  const DATA_MODES = new Set(['demo', 'live', 'authorized_import']);
+
+  function adaptJobSource(meta) {
+    if (!isObj(meta)) return { mode: null, dataMode: null, counts: null, permission: null };
+    const mode = JOB_SOURCES.has(meta.job_source) ? meta.job_source : null;
+    const dataMode = DATA_MODES.has(meta.data_mode) ? meta.data_mode : null;
+    const raw = isObj(meta.source_counts) ? meta.source_counts : null;
+    return {
+      mode,
+      dataMode,
+      counts: raw
+        ? {
+            attempted: num(raw.attempted),
+            collected: num(raw.collected),
+            accepted: num(raw.accepted),
+            rejected: num(raw.rejected),
+            walkEstimated: num(raw.walk_estimated),
+            providers: arr(raw.providers).filter(v => typeof v === 'string' && v),
+          }
+        : null,
+      permission: isObj(meta.source_permission) ? meta.source_permission : null,
+    };
+  }
+
   function adaptResponse(raw) {
     if (!isObj(raw)) {
       throw new ApiClientError('MALFORMED_RESPONSE', '서버 응답을 읽을 수 없습니다.', { retryable: true });
@@ -346,12 +376,15 @@
       });
     }
     // source 는 서버만 안다. 없으면 null 로 두고 화면이 "미상"으로 밝힌다.
+    // source 는 *순위를 만든 방식*(fallback = 서버 규칙)이지 공고 데이터의 출처가
+    // 아니다. 데이터 출처는 meta.job_source / meta.data_mode 로 따로 온다.
     const source = raw.source === 'fallback' || raw.source === 'llm' ? raw.source : null;
     const meta = isObj(raw.meta) ? raw.meta : null;
     return {
       requestId: str(raw.requestId) || null,
       generatedAt: str(raw.generatedAt) || null,
       source,
+      jobSource: adaptJobSource(meta),
       contractVersion: meta ? str(meta.contractVersion) || null : null,
       disclosures: meta ? arr(meta.disclosures).filter(d => typeof d === 'string' && d) : [],
       availableSlots: arr(raw.availableSlots).map(adaptSlot).filter(Boolean),
@@ -506,6 +539,6 @@
     postRecommendations,
     requestRecommendations,
     planIds,
-    _internals: { normTime, toMinutes, adaptPlan, adaptJob, adaptShift, adaptSlot, adaptTravel },
+    _internals: { normTime, toMinutes, adaptPlan, adaptJob, adaptShift, adaptSlot, adaptTravel, adaptJobSource },
   };
 });

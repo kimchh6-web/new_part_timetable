@@ -303,7 +303,7 @@ function viewHome() {
       <p>고정 일정이 끝나는 위치에서 실제로 도착 가능한 공고만 골라, 겹치지 않는 조합을 주간 시간표로 만들어 드립니다.</p>
       <div class="pts"><span>이동 가능성 반영</span><span>조합 최적화</span><span>목표 금액 역산</span><span>실질 시급 계산</span></div>
     </div>
-    ${syntheticNotice()}
+    ${sourceNotice(null)}
     <div style="height:16px"></div>
     <div class="grid-main">
       <div>
@@ -467,7 +467,7 @@ function viewResult() {
     app().innerHTML = `<div class="result-layout">${sidebar()}<div>
       <div class="page-head"><div class="eyebrow">Result</div><h1>${opts.regenerate ? '다른 조합을 다시 찾는 중입니다…' : '추천 조합을 계산하고 있습니다…'}</h1>
         <p>빈 시간 계산 → 이동 가능 후보 필터 → 조합 생성·검증. 최대 30초까지 걸릴 수 있습니다.</p></div>
-      ${syntheticNotice()}
+      ${sourceNotice(null)}
       <div style="height:16px"></div>
       <div class="grid-3" aria-busy="true">${[0,1,2].map(() => `<div class="card"><div class="skeleton sk-line" style="width:40%"></div><div class="skeleton sk-line" style="width:70%;height:28px"></div><div class="skeleton sk-line"></div><div class="skeleton sk-line"></div><div class="skeleton sk-line" style="width:80%"></div></div>`).join('')}</div>
       <div class="note" style="margin-top:16px" role="status" aria-live="polite">입력한 조건은 그대로 유지됩니다. 실패하면 다시 시도할 수 있습니다.</div>
@@ -537,7 +537,7 @@ function viewResult() {
         <h1>추천 조합 ${resp.plans.length}안</h1>
         <p>카드를 눌러 비교하고, 마음에 드는 안을 시간표로 확인하세요.</p>
       </div>
-      ${syntheticNotice()}
+      ${sourceNotice(resp.jobSource)}
       ${resp.source === 'fallback' ? '<div style="height:10px"></div><div class="note warn">LLM 대신 서버 계산 규칙으로 만든 조합입니다. 추천 사유 문구가 단순할 수 있습니다.</div>' : ''}
       ${resp.source === null ? '<div style="height:10px"></div><div class="note warn">서버가 생성 방식(source)을 밝히지 않았습니다.</div>' : ''}
       ${resp.droppedPlans ? `<div style="height:10px"></div><div class="note warn">응답 중 ${resp.droppedPlans}개 안은 형식이 맞지 않아 표시하지 않았습니다.</div>` : ''}
@@ -634,6 +634,7 @@ function viewResult() {
           search: st.search,
           profile: JSON.parse(JSON.stringify(profile)),
           source: st.response.source,
+          jobSource: st.response.jobSource || null,
           requestId: st.response.requestId,
           generatedAt: st.response.generatedAt,
           metrics: plan.metrics,
@@ -699,7 +700,7 @@ function viewSchedule(id) {
     app().innerHTML = `
       <div class="page-head"><div class="eyebrow">Saved · ${new Date(sc.createdAt).toLocaleString('ko-KR')}</div><h1>${esc(sc.title)}</h1>
         <p>${esc(profile.role)} · 집 ${esc(profile.home)} · 목표 ${fmtWon(profile.goal)}${sc.planLabel ? ' · ' + esc(sc.planLabel) : ''}</p></div>
-      ${syntheticNotice()}
+      ${sourceNotice(sc.jobSource || null)}
       ${legacy ? `<div style="height:12px"></div><div class="note warn" role="note"><b>이전 버전에서 저장된 시간표입니다.</b><br>
         당시 브라우저에서 계산한 값이라 지금의 서버 계산 결과와 다를 수 있습니다. 시간표와 연락처는 그대로 보존됩니다.
         최신 기준으로 다시 받으려면 <a href="#/">새로 추천받기</a>를 눌러 주세요.</div>` : ''}
@@ -791,7 +792,7 @@ function viewMy() {
   const list = Store.get('schedules', []);
   app().innerHTML = `
     <div class="page-head"><div class="eyebrow">My Schedules</div><h1>내 스케줄</h1><p>이 브라우저에 저장된 시간표입니다. 로그인 없이 바로 보관됩니다.</p></div>
-    ${syntheticNotice()}
+    ${sourceNotice(null)}
     <div style="height:16px"></div>
     ${list.length ? list.map(s => {
       const legacy = !(s.schemaVersion >= 2);
@@ -913,6 +914,42 @@ function syntheticNotice() {
   return `<div class="note warn synth-note" role="note">
     <b>합성 데모 데이터</b> · 실제 채용 공고가 아니며, 지원이나 예약이 확정되지 않습니다. 연락처·링크도 데모용입니다.
   </div>`;
+}
+
+/* 서버 응답이 밝힌 공고 출처를 그대로 보여준다.
+ *
+ * 규칙 세 가지만 지킨다.
+ *   - 서버가 출처를 밝히기 전(첫 요청 전 · 출처 없는 옛 저장 데이터)에는 중립 문구.
+ *     "합성 데이터"라고 단정하지도, "실제 공고"라고 말하지도 않는다.
+ *   - 실제 공고를 합성 데모라고 부르지 않는다.
+ *   - 수집(live)과 제공(authorized_import)을 섞지 않는다. 제공분은 실시간 크롤링이 아니다.
+ * 데이터 출처는 resp.source(순위를 만든 방식)와 다른 축이므로 따로 표시한다. */
+function sourceNotice(jobSource) {
+  const js = jobSource && typeof jobSource === 'object' ? jobSource : null;
+  const mode = js && js.mode;
+  const dataMode = js && js.dataMode;
+  if (mode === 'demo_json' && (dataMode === 'demo' || dataMode == null)) return syntheticNotice();
+  if (mode === 'public_web' && (dataMode === 'live' || dataMode === 'authorized_import')) {
+    const head = dataMode === 'live'
+      ? '<b>실제 공개 공고</b> · 운영자가 검토해 수집한 실제 채용 공고로 만든 조합입니다.'
+      : '<b>제공된 실제 공고</b> · 권한을 받은 경로로 제공된 실제 채용 공고입니다(실시간 크롤링 아님).';
+    return `<div class="note warn source-note live" role="note">
+      ${head} 합성 데모 데이터가 아닙니다. 지원·예약이 확정된 것은 아니며, 마감·근무 조건은 원문 공고에서 확인하세요.${sourceCountLine(js.counts)}
+    </div>`;
+  }
+  return `<div class="note info source-note unknown" role="note">
+    <b>공고 출처 미표시</b> · 서버가 이 화면의 공고 출처를 밝히지 않았습니다. 실제 공고인지 데모 데이터인지 여기서 단정하지 않습니다.
+  </div>`;
+}
+
+function sourceCountLine(counts) {
+  if (!counts || typeof counts !== 'object') return '';
+  const parts = [];
+  if (typeof counts.accepted === 'number') parts.push(`검증 통과 ${counts.accepted}건`);
+  if (typeof counts.rejected === 'number' && counts.rejected > 0) parts.push(`제외 ${counts.rejected}건`);
+  if (typeof counts.walkEstimated === 'number' && counts.walkEstimated > 0) parts.push(`도보 시간 데모 추정 ${counts.walkEstimated}건`);
+  if (Array.isArray(counts.providers) && counts.providers.length) parts.push(`출처 ${counts.providers.map(esc).join(', ')}`);
+  return parts.length ? `<br><span class="hint">${parts.join(' · ')}</span>` : '';
 }
 
 function warningBlock(warnings, profile) {
@@ -1080,6 +1117,7 @@ if (typeof module === 'object' && module.exports) {
   module.exports = {
     toViewJob, toViewJobLegacy, toStorageJob, localWeekly, renderTimetable, jobItem,
     warningBlock, metricsRowServer, slotsCard, buildDayTimeline, syntheticNotice,
+    sourceNotice, sourceCountLine,
     disclosureBlock, shiftTravelMinutes, safeProfile,
     regeneratePayload, togglePin, excludeJob, mergeSeenPlanIds, MAX_SEEN_PLAN_IDS,
   };

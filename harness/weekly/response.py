@@ -74,6 +74,110 @@ DATASET_DISCLOSURE = (
 )
 
 
+#: Said instead of :data:`DATASET_DISCLOSURE` when the rows came from the
+#: reviewed public-job artifact. Two modes, kept apart: rows the collector
+#: fetched itself (``live``) and rows an authorized party handed over
+#: (``authorized_import``). Neither is the synthetic dataset, and neither is
+#: described as the other.
+LIVE_SOURCE_DISCLOSURE = (
+    "공고 데이터는 운영자가 검토해 가져온 실제 공개 채용 공고입니다. 합성 데모 "
+    "데이터셋(600건)이 아닙니다. 수집 시점 이후의 마감·변경은 반영되지 않으므로 "
+    "지원 전에 원문 공고를 확인하십시오."
+)
+
+IMPORT_SOURCE_DISCLOSURE = (
+    "공고 데이터는 권한을 받은 경로로 제공된 실제 채용 공고입니다(제공 수입). "
+    "실시간 크롤링 결과가 아니고 합성 데모 데이터셋(600건)도 아닙니다. 제공 시점 "
+    "이후의 마감·변경은 반영되지 않으므로 지원 전에 원문 공고를 확인하십시오."
+)
+
+UNKNOWN_SOURCE_DISCLOSURE = (
+    "공고 데이터의 출처를 서버가 밝히지 않았습니다. 실제 공고인지 데모 데이터인지 "
+    "이 응답만으로는 단정할 수 없습니다."
+)
+
+IMPORTED_TRAVEL_DISCLOSURE = (
+    "가져온 공고에는 역에서 근무지까지의 도보 시간이 공개되어 있지 않아, 값이 없는 "
+    "공고는 데모 추정치 15분으로 계산했습니다. 추정치일 뿐 상한이 아니며 실제 도보 "
+    "시간은 더 길 수도 짧을 수도 있습니다. 경로를 조회한 값이 아닙니다."
+)
+
+IMPORTED_PROJECTION_DISCLOSURE = (
+    "monthlyIncome은 이번 주 배정을 매주 반복한다고 가정하고 4.3을 곱한 추정값입니다. "
+    "보장된 수입이 아니며, 근무 기간이 정해진 공고라면 그 기간까지만 유효합니다. "
+    "공고에 반복 근무가 명시되지 않았거나 하루·날짜 지정 공고는 후보에서 제외했습니다."
+)
+
+IMPORTED_DEADLINE_DISCLOSURE = (
+    "마감이 날짜로 공개된 공고는 지난 것을 제외했지만, '채용시 마감'처럼 날짜가 없는 "
+    "마감 표기는 판정하지 않았습니다. 모집 상태는 수집 시점의 표기일 뿐입니다."
+)
+
+IMPORTED_QUALIFICATION_DISCLOSURE = (
+    "실제 공고의 자격 요건(면허·경력·나이 등)은 이 요청으로 확인할 수 없습니다. "
+    "충족한 것으로 간주하지 않았고, 확인이 필요한 항목으로만 표시합니다."
+)
+
+
+def apply_job_source(
+    response: dict[str, Any], provenance: dict[str, Any] | None
+) -> dict[str, Any]:
+    """Make the response say where its rows actually came from.
+
+    ``provenance`` is written by the controller (never by a user payload) and
+    carries ``job_source``/``data_mode`` plus the source counts. This function
+    puts those on ``meta`` and swaps the dataset disclosure for one that is
+    true of the rows that were actually used — the synthetic-dataset sentence
+    must not survive on a response built from real postings, and the reverse
+    must not happen either.
+
+    It deliberately does **not** touch ``response['source']``: that field names
+    the ranking engine (``fallback`` = deterministic, no LLM) and has nothing
+    to do with where the job rows came from.
+    """
+    if not isinstance(response, dict) or not isinstance(provenance, dict):
+        return response
+    meta = response.setdefault("meta", {})
+    job_source = provenance.get("job_source") or "unknown"
+    data_mode = provenance.get("data_mode") or "unknown"
+    meta["job_source"] = job_source
+    meta["data_mode"] = data_mode
+    counts = provenance.get("source_counts")
+    if isinstance(counts, dict):
+        meta["source_counts"] = dict(counts)
+    permission = provenance.get("source_permission")
+    if isinstance(permission, dict):
+        # What the operator recorded, not a finding of this pipeline.
+        meta["source_permission"] = dict(permission)
+
+    notes = [
+        note
+        for note in (meta.get("disclosures") or [])
+        if note not in (DATASET_DISCLOSURE, QUALIFICATION_DISCLOSURE)
+    ]
+    meta["disclosures"] = notes + source_disclosures(job_source, data_mode)
+    return response
+
+
+def source_disclosures(job_source: str, data_mode: str) -> list[str]:
+    """The dataset statements that are true for one job source."""
+    if job_source == "demo_json" and data_mode in ("demo", "unknown"):
+        return [DATASET_DISCLOSURE, QUALIFICATION_DISCLOSURE]
+    if job_source == "public_web" and data_mode == "live":
+        head = LIVE_SOURCE_DISCLOSURE
+    elif job_source == "public_web" and data_mode == "authorized_import":
+        head = IMPORT_SOURCE_DISCLOSURE
+    else:
+        return [UNKNOWN_SOURCE_DISCLOSURE, QUALIFICATION_DISCLOSURE]
+    return [
+        head,
+        IMPORTED_TRAVEL_DISCLOSURE,
+        IMPORTED_PROJECTION_DISCLOSURE,
+        IMPORTED_DEADLINE_DISCLOSURE,
+        IMPORTED_QUALIFICATION_DISCLOSURE,
+    ]
+
+
 def build_response(
     *,
     request: dict[str, Any],
@@ -484,6 +588,15 @@ def _timestamp(now: datetime | None) -> str:
 __all__ = [
     "BALANCED_PRIORITY_DISCLOSURE",
     "DATASET_DISCLOSURE",
+    "IMPORTED_DEADLINE_DISCLOSURE",
+    "IMPORTED_PROJECTION_DISCLOSURE",
+    "IMPORTED_QUALIFICATION_DISCLOSURE",
+    "IMPORTED_TRAVEL_DISCLOSURE",
+    "IMPORT_SOURCE_DISCLOSURE",
+    "LIVE_SOURCE_DISCLOSURE",
+    "UNKNOWN_SOURCE_DISCLOSURE",
+    "apply_job_source",
+    "source_disclosures",
     "HOLIDAY_PAY_DISCLOSURE",
     "KST",
     "QUALIFICATION_DISCLOSURE",

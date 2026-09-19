@@ -282,6 +282,11 @@ class DaytonaScheduleExecutionRuntime:
         alias for the same argument.
         """
         rows = jobs if jobs is not None else mock_jobs
+        source: dict[str, Any] | None = None
+        if _mode == "weekly" and rows is None:
+            # Server-controlled configuration only: no path and no URL from the
+            # HTTP payload ever reaches this call.
+            rows, source = self._configured_rows()
         started = time.time()
         trace: list[str] = []
 
@@ -310,7 +315,7 @@ class DaytonaScheduleExecutionRuntime:
         # ``jobs`` is the only row carrier: shipping the same list twice would
         # double the request for an injected dataset. The remote entry still
         # reads ``mock_jobs`` from older request files.
-        request = {"ctx": ctx, "jobs": rows, "mode": _mode}
+        request = {"ctx": ctx, "jobs": rows, "mode": _mode, "source": source}
         sandbox.fs.upload_files(
             [
                 FileUpload(
@@ -370,6 +375,25 @@ class DaytonaScheduleExecutionRuntime:
             ]
         )
 
+        if source is not None:
+            # The controller knows what it shipped; this is not the sandbox's
+            # claim to make. ``source`` here is *data provenance* and is kept
+            # apart from ``source: 'fallback'`` in the response body, which
+            # names the ranking engine.
+            meta.update(
+                {
+                    "job_source": source["job_source"],
+                    "data_mode": source["data_mode"],
+                    "source_counts": dict(source["source_counts"]),
+                }
+            )
+            if source.get("source_permission"):
+                meta["source_permission"] = dict(source["source_permission"])
+            trace.append(
+                f"[daytona] job source {source['job_source']}/{source['data_mode']}: "
+                f"shipped {len(rows or [])} reviewed row(s) from the local artifact"
+            )
+
         meta.update(
             {
                 "runtime_provider": "daytona",
@@ -384,6 +408,84 @@ class DaytonaScheduleExecutionRuntime:
         if _mode == "weekly":
             return self._weekly_result(payload, meta)
         return {"candidates": candidates, "meta": meta}
+
+    def _configured_rows(self) -> tuple[list[dict] | None, dict[str, Any] | None]:
+        """Rows for the configured job source, or ``(None, None)`` for the demo.
+
+        The default (``HARNESS_JOB_SOURCE`` unset or ``demo_json``) returns
+        ``(None, None)`` so the sandbox loads the canonical 600-row dataset
+        exactly as before. With ``public_web`` the reviewed local artifact is
+        loaded and validated **here**, and only rows that survived validation
+        travel to the sandbox.
+
+        Two refusals, never a silent swap to the demo dataset:
+
+        * an unusable artifact is a transport-level
+          :class:`DaytonaRuntimeError` whose message names a code and nothing
+          about the host — no path, no environment, no secret;
+        * an artifact whose rows are all ineligible is the domain's own
+          ``NO_CANDIDATES``, with the rejection tally attached.
+        """
+        from ..sources.imported_jobs import (
+            ImportedJobsError,
+            load_imported_jobs,
+            resolve_job_source,
+        )
+
+        try:
+            config = resolve_job_source()
+        except ImportedJobsError as exc:
+            raise DaytonaRuntimeError(
+                f"job source configuration rejected ({exc.code})"
+            ) from None
+        if config is None:
+            return None, None
+
+        try:
+            loaded = load_imported_jobs(config["path"])
+        except ImportedJobsError as exc:
+            raise DaytonaRuntimeError(
+                f"public job artifact unusable ({exc.code})"
+            ) from None
+
+        meta = loaded["meta"]
+        counts = {
+            key: meta[key]
+            for key in (
+                "attempted",
+                "collected",
+                "received",
+                "accepted",
+                "rejected",
+                "walk_estimated",
+                "collector_errors",
+            )
+        }
+        counts["rejection_reasons"] = dict(meta["rejection_reasons"])
+        counts["providers"] = list(meta["providers"])
+        source = {
+            "job_source": meta["job_source"],
+            "data_mode": meta["data_mode"],
+            "source_counts": counts,
+            "source_permission": meta.get("source_permission"),
+            "ttl_hours": meta["ttl_hours"],
+            "walk_estimated": meta["walk_estimated"],
+        }
+
+        if not loaded["jobs"]:
+            from ..weekly import WeeklyValidationError
+
+            raise WeeklyValidationError(
+                "NO_CANDIDATES",
+                "가져온 공개 공고 중 이번 일정에 쓸 수 있는 공고가 없습니다.",
+                details={
+                    "reason": "NO_ELIGIBLE_IMPORTED_JOBS",
+                    "jobSource": meta["job_source"],
+                    "dataMode": meta["data_mode"],
+                    "sourceCounts": counts,
+                },
+            )
+        return loaded["jobs"], source
 
     @staticmethod
     def _weekly_result(payload: dict, meta: dict[str, Any]) -> dict:

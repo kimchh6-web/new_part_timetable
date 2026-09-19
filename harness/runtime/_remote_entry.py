@@ -53,16 +53,38 @@ def main(argv: list[str]) -> int:
         if request.get("mode", "daily") == "weekly":
             from harness.sources import JsonJobSource
             from harness.weekly import build_weekly_recommendations, WeeklyValidationError
+            from harness.weekly.response import apply_job_source
 
             # The canonical dataset is read *here*, inside the sandbox, through
             # the same source seam the daily path uses.
             loaded = JsonJobSource().get_jobs(request["ctx"]) if rows is None else rows
+            # A descriptor the *controller* wrote after validating a reviewed
+            # artifact. It never comes from a user payload, and it is the only
+            # thing allowed to say the rows are not the demo dataset.
+            source = request.get("source")
+            if not isinstance(source, dict):
+                source = None
             provenance = {
                 "jobs_loaded": len(loaded),
-                "job_source": "caller_supplied" if rows is not None else "demo_json",
+                "job_source": (
+                    source["job_source"] if source
+                    else "caller_supplied" if rows is not None
+                    else "demo_json"
+                ),
+                "data_mode": (
+                    source["data_mode"] if source
+                    else "unknown" if rows is not None
+                    else "demo"
+                ),
             }
+            if source and isinstance(source.get("source_counts"), dict):
+                provenance["source_counts"] = dict(source["source_counts"])
+            if source and isinstance(source.get("source_permission"), dict):
+                provenance["source_permission"] = dict(source["source_permission"])
             try:
-                result = build_weekly_recommendations(request["ctx"], loaded)
+                result = apply_job_source(
+                    build_weekly_recommendations(request["ctx"], loaded), provenance
+                )
                 payload["result"] = result
                 batch = {"candidates": [], "meta": dict(result.get("meta", {}))}
             except WeeklyValidationError as exc:
