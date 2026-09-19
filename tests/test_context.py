@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import unittest
 
-from tests.support import PRIMARY_PAYLOAD, payload
+from tests.support import PRIMARY_PAYLOAD, load_primary_input, payload
 
 
 def parse(data):
@@ -45,6 +45,29 @@ class PrimaryInputTests(unittest.TestCase):
         ctx = parse(payload(skills="POS 경험 6개월, 보건증", avoid_jobs="설거지\n주방 보조"))
         self.assertEqual(ctx["skills"], ["POS 경험 6개월", "보건증"])
         self.assertEqual(ctx["avoid_jobs"], ["설거지", "주방 보조"])
+
+    def test_the_acceptance_input_is_the_document_that_ships(self):
+        """PRIMARY_PAYLOAD must stay the file demo.py and the example actually read."""
+        self.assertEqual(PRIMARY_PAYLOAD, load_primary_input())
+
+
+class NegotiationOptInTests(unittest.TestCase):
+    """Time proposals are opt-in at the parsing layer, before any planning."""
+
+    def test_the_flag_defaults_to_false_when_the_user_never_mentions_it(self):
+        self.assertNotIn("allow_negotiable_proposals", payload())
+        self.assertIs(parse(payload())["allow_negotiable_proposals"], False)
+
+    def test_the_acceptance_input_opts_in_explicitly(self):
+        self.assertIs(PRIMARY_PAYLOAD["allow_negotiable_proposals"], True)
+        self.assertIs(parse(PRIMARY_PAYLOAD)["allow_negotiable_proposals"], True)
+
+    def test_a_non_boolean_opt_in_is_rejected_not_coerced(self):
+        """'yes'/1 must never be read as consent to move a published shift."""
+        for value in ("yes", "true", 1, [], {}):
+            with self.subTest(value=value):
+                with self.assertRaises(ValueError):
+                    parse(payload(allow_negotiable_proposals=value))
 
 
 class ValidationTests(unittest.TestCase):

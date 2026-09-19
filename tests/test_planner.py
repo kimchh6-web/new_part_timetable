@@ -1,7 +1,14 @@
 """Planner tests: hard travel/time constraints, skills, income arithmetic.
 
-All rows here are caller-supplied (with caller-supplied travel estimates), so
-nothing depends on the bundled fixture and no travel time is ever invented.
+Every row here is built by :func:`tests.support.mock_job` and injected
+explicitly. These are legacy-schema rows, which carry their own
+``travel_from_start_min`` / ``travel_to_home_min``: the point is to pin ONE
+planner rule at a time against numbers the test states outright, so nothing
+depends on the bundled fixture file, nothing is read off the canonical dataset,
+and no travel time is ever invented.
+
+Acceptance numbers do NOT live here - the canonical 600-job dataset decides
+those, and ``test_e2e`` / ``test_demo_cli`` assert them.
 """
 from __future__ import annotations
 
@@ -94,12 +101,17 @@ class ScheduleFitTests(unittest.TestCase):
 
 
 class IncomeTests(unittest.TestCase):
-    def test_primary_scenario_pays_52000(self):
+    def test_income_is_wage_times_duration_and_the_block_agrees(self):
+        """13,000/h over the injected 14:40-18:40 shift = 4h x 13,000 = 52,000."""
         batch = plan(payload(), [mock_job("job-01")])
         candidate = batch["candidates"][0]
         self.assertEqual(float(candidate["daily_income"]), 52000.0)
         job_block = blocks_by_kind(candidate["schedule"])["job"][0]
-        self.assertEqual(float(job_block["estimated_income"]), 52000.0)
+        self.assertEqual(
+            float(job_block["estimated_income"]),
+            float(candidate["daily_income"]),
+            "the candidate total and its job block must not tell two stories",
+        )
 
     def test_income_is_hourly_pay_times_duration(self):
         batch = plan(payload(), [mock_job("job-90min", start="14:40", end="16:10")])

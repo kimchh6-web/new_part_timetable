@@ -5,7 +5,13 @@ Two kinds of input appear in this suite:
 * the **canonical dataset** (`harness/fixtures/jobs.json`, 600 rows) — the
   default for demo and acceptance tests; never modified, only read;
 * **explicitly injected rows** built by :func:`rich_job` — canonical-schema
-  records used for focused unit tests of one rule at a time.
+  records used for focused unit tests of one rule at a time;
+* **legacy rows** built by :func:`mock_job` — the hand-written 5-job schema
+  (``start``/``end``/``hourly_pay``/``travel_*_min``). The planner still
+  supports this shape (``harness.planner._plan_legacy_row``) and
+  :class:`harness.sources.MockJobSource` still serves it, so it is still
+  covered — but only as an *explicitly injected* unit fixture. It is never the
+  default source, and no acceptance number is read off it.
 
 Travel policy under test (demo estimator, one isolated constant in the planner
 lane): each leg costs ``TRANSIT_BASE_MIN + walkMinutes``.
@@ -61,6 +67,21 @@ def negotiable_payload(**overrides: Any) -> dict[str, Any]:
     data = payload(**overrides)
     data["allow_negotiable_proposals"] = True
     return data
+
+
+#: The PM acceptance input, verbatim — the same document that ships as
+#: ``examples/primary_input.json`` (asserted equal in ``test_context``). Proposals
+#: are opted in, so over the canonical dataset this context produces a real,
+#: non-empty, *proposed* plan.
+PRIMARY_PAYLOAD: dict[str, Any] = negotiable_payload()
+
+#: Where that document lives on disk, so a test can prove the two agree.
+PRIMARY_INPUT_PATH = ROOT / "examples" / "primary_input.json"
+
+
+def load_primary_input() -> dict[str, Any]:
+    """The shipped example input file, freshly parsed."""
+    return json.loads(PRIMARY_INPUT_PATH.read_text(encoding="utf-8"))
 
 
 #: negotiation policy under test
@@ -158,6 +179,42 @@ def rich_job(
         "contact": None,
     }
     row.update(extra)
+    return row
+
+
+#: Legacy fixture defaults, mirroring bundled row ``job-01``. Keeping them
+#: identical is what lets a unit test reason about one rule at a time while the
+#: numbers stay the ones the fixture file itself documents.
+LEGACY_JOB_DEFAULTS: dict[str, Any] = {
+    "title": "의류 매장 단기 정리",
+    "location": "역삼",
+    "start": "14:40",
+    "end": "18:40",
+    "hourly_pay": 13000,
+    "category": "store",
+    "description": "상품 정리 및 고객 안내, POS 사용",
+    "required_skills": [],
+    "preferred_skills": ["POS"],
+    "travel_from_start_min": 40,
+    "travel_to_home_min": 40,
+}
+
+
+def mock_job(job_id: str = "job-01", **overrides: Any) -> dict[str, Any]:
+    """A legacy-schema row, for explicit injection in focused planner tests.
+
+    The legacy shape carries its own ``travel_from_start_min`` /
+    ``travel_to_home_min``, so a test that injects one is asserting the
+    planner's arithmetic on *caller-supplied* minutes — nothing is read from the
+    canonical dataset and no travel time is estimated.
+
+    Overrides are applied verbatim, including ``None`` and wrong-typed values:
+    malformed-row tests depend on the bad value actually reaching the planner
+    rather than being silently repaired here.
+    """
+    row: dict[str, Any] = {"id": job_id}
+    row.update(copy.deepcopy(LEGACY_JOB_DEFAULTS))
+    row.update(copy.deepcopy(overrides))
     return row
 
 

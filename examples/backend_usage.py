@@ -6,6 +6,11 @@ The whole surface is one call - no wrapper objects, no ``.to_dict()``::
     result = run_harness(payload)          # real Daytona execution
     return result                          # already JSON-serialisable
 
+Scope: **one day**. ``run_harness`` plans a single target weekday and the
+summary it returns is a single day's income measured against the user's weekly
+target (``target_progress_percent`` = today's share of the week). There is no
+week-planning call to show here, so this snippet does not imply one.
+
 Framework shape::
 
     # FastAPI
@@ -34,6 +39,16 @@ if str(ROOT) not in sys.path:
 
 from harness import run_harness  # noqa: E402  (path bootstrap must run first)
 
+#: The shipped acceptance input, kept byte-for-byte in step with
+#: ``examples/primary_input.json`` (a test asserts the two are equal).
+#:
+#: ``allow_negotiable_proposals`` is **the** field that makes this snippet show
+#: a working case. Over the canonical 600-job dataset a 14:00-20:00 window with
+#: strictly published times fits nothing on any weekday, so leaving the flag out
+#: returns an honest *empty* plan. Opting in lets the planner propose a delayed
+#: start (<=120 min, duration and weekday preserved) for postings that say
+#: ``timeNegotiable``; the result is labelled ``schedule_status="proposed"`` and
+#: ``requires_employer_confirmation=True`` - a proposal, never a booking.
 PAYLOAD = {
     "start_location": "서울 강남",
     "home_location": "서울 용산",
@@ -43,6 +58,7 @@ PAYLOAD = {
     "skills": ["POS 경험 6개월", "보건증"],
     "preferred_jobs": ["의류 행사", "매장 정리"],
     "avoid_jobs": ["설거지", "주방 보조"],
+    "allow_negotiable_proposals": True,
 }
 
 

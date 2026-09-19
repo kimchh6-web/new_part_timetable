@@ -1,4 +1,11 @@
-"""MockJobSource fixture contract and deterministic ranking contract."""
+"""Job-source contracts and the deterministic ranking contract.
+
+``JsonJobSource`` is the production default and serves the canonical 600-job
+dataset; ``MockJobSource`` is the legacy hand-written 5-job fixture, kept only
+as an explicitly constructed test helper. Both are still shipped, so both are
+still covered here - but the tests below also pin which of the two is the
+default, so the legacy fixture cannot quietly become the product again.
+"""
 from __future__ import annotations
 
 import unittest
@@ -32,6 +39,39 @@ MOCK_JOB_KEYS = {
     "travel_from_start_min",
     "travel_to_home_min",
 }
+
+
+class DefaultSourceTests(unittest.TestCase):
+    """What a caller gets when it asks for a source without saying which."""
+
+    def _json_source(self, records=None):
+        from harness.sources import JsonJobSource
+
+        return JsonJobSource(records=records) if records is not None else JsonJobSource()
+
+    def test_the_default_source_serves_the_canonical_600_row_dataset(self):
+        rows = self._json_source().get_jobs(context())
+        self.assertEqual(len(rows), 600)
+        self.assertTrue(all(isinstance(r, dict) and "shifts" in r for r in rows))
+
+    def test_the_default_source_declares_the_data_synthetic(self):
+        src = self._json_source()
+        src.get_jobs(context())
+        self.assertTrue(src.warnings, "a synthetic dataset must say so")
+
+    def test_the_legacy_fixture_is_a_different_source_not_the_default(self):
+        from harness.sources import JsonJobSource, MockJobSource
+
+        self.assertNotEqual(JsonJobSource.job_source, MockJobSource.job_source)
+        self.assertEqual(MockJobSource.job_source, "handcrafted_mock")
+
+    def test_the_runtime_pipeline_plans_against_the_canonical_dataset(self):
+        """``jobs=None`` must reach for the 600-row dataset, not the 5-job fixture."""
+        from harness.runtime.pipeline import run_planning
+
+        batch = run_planning(context())
+        self.assertEqual(batch["meta"]["jobs_loaded"], 600)
+        self.assertEqual(batch["meta"]["job_source"], "demo_json")
 
 
 class MockJobSourceTests(unittest.TestCase):
