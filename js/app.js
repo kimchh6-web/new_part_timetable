@@ -37,6 +37,7 @@ function router() {
   const profile = Store.get('profile');
   document.querySelectorAll('.nav a').forEach(a => a.classList.toggle('active', a.getAttribute('href') === '#' + hash.split('/').slice(0, 2).join('/')));
   window.scrollTo(0, 0);
+  if (hash === '/live') return viewLiveDemo();
   if (hash === '/reset') { if (confirm('저장된 내 정보와 스케줄을 모두 지우고 처음부터 시작할까요?')) { localStorage.clear(); sessionStorage.clear(); } navigate('/onboarding'); return; }
   const m = hash.match(/^\/schedule\/(.+)$/);
   if (m) return viewSchedule(decodeURIComponent(m[1]));
