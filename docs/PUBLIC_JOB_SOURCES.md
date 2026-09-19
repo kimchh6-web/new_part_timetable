@@ -28,10 +28,13 @@
   `robots.py` 를 직접 구현했다 — 가장 긴 규칙이 이기고, 길이가 같으면 `Allow`
   가 이긴다. 같은 user-agent 그룹이 여러 번 나오면 규칙을 합친다. 지원 문법은
   `User-agent` / `Allow` / `Disallow` / `*` / `$` / `#` 로 한정했고
-  `Crawl-delay` 는 무시한다(우리는 무조건 1초 이상 쉬므로 더 엄격하다).
+  `Crawl-delay` 는 표준 밖 확장이라 **지원하지 않는다** — 값을 읽지 않는다. 지금
+  강제되는 것은 `MIN_INTERVAL_SECONDS = 1.0` 의 최소 간격뿐이므로, 제공자가 1초보다
+  긴 값을 게시했다면 그것을 지키지 못한다. 활성화 전에 현재 robots.txt 를 사람이
+  검토하고, 더 긴 제공자 한도가 있으면 그 값을 지키도록 정해야 한다.
 * **user-agent 를 빌리지 않는다.** `USER_AGENT` 는
   `timetable-harness-public-sources/0.1 …` 이고, Googlebot·Yeti·ClaudeBot 등
-  어떤 토큰도 포함하지 않는다. 그 토큰들은 두 사이트에서 *다른(더 넓은)* 그룹을
+  어떤 토큰도 포함하지 않는다. 그 토큰들은 두 사이트에서 *우리 것이 아닌 다른* 그룹을
   선택하게 만들므로, 빌려 쓰는 것은 받지 않은 허가를 주장하는 일이다. 테스트가
   이를 기계적으로 막는다(`FORBIDDEN_USER_AGENT_TOKENS`).
 

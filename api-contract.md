@@ -4,7 +4,14 @@
 기본 웹 흐름은 [주간 추천 계약](examples/WEEKLY_API.md)의
 `POST /api/recommendations`를 사용한다. 아래 일일 데모 계약은 `/#/live`에서 유지한다.
 
-두 API 모두 제공된 600개 합성 공고를 사용한다. 실제 구인 공고나 확정된 근무 배정이 아니다.
+기본 공고 데이터는 제공된 600개 합성 공고다. 실제 구인 공고나 확정된 근무 배정이 아니다.
+일일 데모 계약은 언제나 이 합성 데이터만 쓴다. 주간 추천만 서버 환경변수
+`HARNESS_JOB_SOURCE=public_web`으로 opt-in 하면, 검토를 마친 로컬 아티팩트의 공개 공고를
+대신 읽는다 — 설정과 검증 규칙은 [공개 채용 공고 연동](docs/PUBLIC_JOB_INTEGRATION.md).
+공개 제공자 수집 자체는 여전히 기본 비활성(`permission_required`)이며, opt-in 은
+라이브 수집이 돌고 있다는 뜻이 아니다.
+`source`(`llm|fallback`)는 **추천을 만든 방식**이고, `meta.job_source`/`meta.data_mode`는
+**공고 데이터의 출처**다. 두 값은 서로 독립이다.
 일일 `availability` 입력과 주간 `profile/search/regenerate` 입력은 서로 대체할 수 없다.
 
 ## POST /api/demo/schedule
