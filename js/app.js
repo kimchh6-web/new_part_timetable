@@ -111,6 +111,20 @@ function safeProfile(p) {
   return out;
 }
 
+/**
+ * 요청 결과를 좌우하는 프로필 필드만 뽑은 지문.
+ * 화면 표시용 필드(sameDaily 등)는 보지 않는다. 결과를 받은 뒤 내 정보를 바꿨는지
+ * 판단하는 데만 쓴다 — 바뀌었으면 그 결과는 지금 조건의 답이 아니다.
+ */
+function profileSignature(p) {
+  const s = safeProfile(p);
+  const days = DAYS.map(d => {
+    const row = s.schedule[d];
+    return row && row.has ? `${d}:${row.start}-${row.end}@${row.place}` : `${d}:-`;
+  }).join('|');
+  return JSON.stringify([String(s.role ?? ''), String(s.home ?? ''), Number(s.minBlock) || 0, !!s.night, !!s.want15, Number(s.goal) || 0, s.age == null ? null : Number(s.age), days]);
+}
+
 /* ---------- 라우터 ---------- */
 const routes = {
   '/onboarding': viewOnboarding,
@@ -358,10 +372,50 @@ function viewHome() {
 /* =====================================================================
  * 결과 — 서버 응답(3안) → 시간표 → 상세
  * ===================================================================*/
+
+/* /result 화면이 다시 열릴 때마다 오른다. 날아가 있는 요청의 주인이 누구인지
+ * 가리는 데 쓴다 — 아래 owns() 주석 참고. */
+let resultEpoch = 0;
+
+/** 결과 상태 한 벌을 가리키는 이름표. 저장소가 갈아치워졌는지 보는 데 쓴다. */
+function newSessionId() {
+  return 'r' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+}
+
 function viewResult() {
-  const profile = Store.get('profile');
+  const currentProfile = Store.get('profile');
   let st = Session.get();
   let busy = false;
+
+  /* ---------- 응답의 소유권 ----------
+   * 요청 하나는 30초까지 걸린다. 그 사이에 사용자는 홈으로 돌아가 조건을 바꾸고
+   * 다시 추천을 누를 수도, 옆의 기록을 열 수도 있다. 그때 먼저 나간 요청이 늦게
+   * 도착해 Session·기록·화면을 덮어쓰면, 화면은 지금 조건이 아닌 옛 조건의 결과를
+   * "지금 결과"라고 말하게 된다. 그래서 요청마다 주인 자격을 확인한다.
+   *   epoch  — 이 /result 화면 자체가 아직 그 자리인가 (홈 → 재진입 시 오른다)
+   *   seq    — 이 화면 안에서 사용자가 다른 상태로 갈아타지 않았는가 (기록 열기 등)
+   *   sid    — 저장소의 결과가 아직 이 요청이 쓰던 그것인가. 초기화(#/reset)나
+   *            홈에서의 새 검색은 sessionStorage 를 통째로 갈아치우므로, 그 뒤에
+   *            도착한 응답이 지운 결과를 되살리거나 새 검색을 덮지 못하게 막는다.
+   * 주인이 아닌 응답은 성공이든 실패든 아무것도 쓰지 않고 조용히 버린다.
+   * location.hash 비교만으로는 세 경우 모두 같은 '#/result' 라 구분되지 않는다. */
+  const epoch = ++resultEpoch;
+  let runSeq = 0;
+  const sessionHolds = () => { const cur = Session.get(); return !!cur && !!st.sid && cur.sid === st.sid; };
+  const owns = seq => epoch === resultEpoch && seq === runSeq && sessionHolds();
+  /** 사용자가 다른 상태로 갈아탔다 — 날아가 있는 요청에서 주인 자격을 거둔다. */
+  const takeOver = () => { runSeq++; busy = false; };
+
+  /**
+   * 지금 그리고 있는 결과가 받아졌을 때의 내 정보.
+   * 당시 값이 남아 있지 않은 옛 기록은 지금의 고정 일정을 그 결과의 일부인 양
+   * 겹쳐 그리지 않는다 — 모르는 것은 그리지 않고 아래 안내로 밝힌다.
+   */
+  const viewProfile = () => {
+    if (st.profile) return safeProfile(st.profile);
+    if (st.profileUnknown) return safeProfile({ ...safeProfile(currentProfile), schedule: {} });
+    return safeProfile(currentProfile);
+  };
 
   if (!st) {
     const usable = usableHistory();
@@ -372,9 +426,12 @@ function viewResult() {
   st.pinned = st.pinned || [];
   st.excluded = st.excluded || [];
   st.seenPlanIds = st.seenPlanIds || [];
+  if (!st.sid) st.sid = newSessionId();
+  Session.set(st);
 
   function fromHistory(h) {
-    return { search: h.search || Store.get('lastSearch') || { count: 2, categories: [], priority: 'wage' }, pinned: h.pinned || [], excluded: h.excluded || [], seenPlanIds: [], selected: 0, response: h.response, historyId: h.id, error: null };
+    // profile 이 없는 옛 기록은 null 로 둔다. 현재 내 정보로 그리되 그 사실을 밝힌다.
+    return { sid: newSessionId(), profileUnknown: !h.profile, search: h.search || Store.get('lastSearch') || { count: 2, categories: [], priority: 'wage' }, pinned: h.pinned || [], excluded: h.excluded || [], seenPlanIds: [], selected: 0, response: h.response, profile: h.profile || null, historyId: h.id, error: null };
   }
 
   /* ---------- 서버 호출 ---------- */
@@ -385,28 +442,35 @@ function viewResult() {
       Session.set(st); drawError(); return;
     }
     busy = true;
+    const seq = ++runSeq;
     st.error = null;
     Session.set(st);
     drawLoading(opts);
     const startedAt = location.hash;
     try {
       const { request, response } = await WeeklyApi.requestRecommendations(
-        profile, st.search, regeneratePayload(st, opts));
+        currentProfile, st.search, regeneratePayload(st, opts));
+      if (!owns(seq)) return;                     // 주인이 아니다 — 기록에도 남기지 않는다
       st.request = request;
       st.response = response;
+      // 이 응답이 어떤 내 정보로 받아진 것인지 함께 붙든다. 나중에 내 정보를 바꾸면
+      // 이 결과는 그 조건의 답이 아니므로, 지금의 고정 일정 위에 겹쳐 그리지 않는다.
+      st.profile = JSON.parse(JSON.stringify(currentProfile));
+      st.profileUnknown = false;
       st.seenPlanIds = mergeSeenPlanIds(st.seenPlanIds, WeeklyApi.planIds(response));
       st.selected = 0;
-      st.historyId = pushHistory({ search: st.search, pinned: st.pinned, excluded: st.excluded, response });
+      st.historyId = pushHistory({ search: st.search, pinned: st.pinned, excluded: st.excluded, profile: st.profile, response });
       Session.set(st);
       // 응답을 기다리는 동안 다른 화면으로 갔다면 그 화면을 덮어쓰지 않는다.
       // 결과는 Session 에 남아 있으므로 /result 로 돌아오면 그대로 보인다.
       if (location.hash === startedAt) draw();
     } catch (e) {
+      if (!owns(seq)) return;                     // 늦게 온 옛 요청의 실패로 지금 결과를 지우지 않는다
       st.error = { code: e.code || 'NETWORK', message: e.message, details: e.details || null, suggestions: e.suggestions || [], retryable: e.retryable !== false };
       Session.set(st);
       if (location.hash === startedAt) drawError();
     } finally {
-      busy = false;
+      if (owns(seq)) busy = false;
     }
   };
 
@@ -442,6 +506,7 @@ function viewResult() {
     document.querySelectorAll('.hist-item[data-hid]').forEach(el => el.onclick = e => {
       if (e.target.closest('[data-hdel]')) return;
       const entry = historyEntries().find(x => x.id === el.dataset.hid); if (!entry) return;
+      takeOver();                                  // 날아가 있던 요청이 이 기록을 밀어내지 못하게
       st = fromHistory(entry); Session.set(st); draw();
     });
     document.querySelectorAll('.hist-item[data-hlegacy]').forEach(el => el.onclick = e => {
@@ -455,8 +520,8 @@ function viewResult() {
       Store.set('history', rest);
       if (st.historyId === id) {
         const usable = rest.filter(isUsableHistory);
-        if (usable.length) { st = fromHistory(usable[0]); Session.set(st); draw(); }
-        else { Session.clear(); navigate('/'); }
+        if (usable.length) { takeOver(); st = fromHistory(usable[0]); Session.set(st); draw(); }
+        else { takeOver(); Session.clear(); navigate('/'); }
       } else draw();
     });
     const clr = $('#hist-clear'); if (clr) clr.onclick = () => { Store.set('history', []); st.historyId = null; draw(); toast('기록을 모두 지웠습니다.'); };
@@ -511,7 +576,7 @@ function viewResult() {
     const cp = $('#clearpins'); if (cp) cp.onclick = () => { st.pinned = []; st.excluded = []; Session.set(st); run({ fresh: true }); };
     document.querySelectorAll('[data-sugg]').forEach(b => b.onclick = () => {
       const s = (st.error.suggestions || [])[+b.dataset.sugg]; if (!s) return;
-      applySuggestion(s, profile, st);
+      applySuggestion(s, currentProfile, st);
       Session.set(st);
       toast('조건을 바꿔 다시 요청합니다.');
       run({ fresh: true });
@@ -527,6 +592,12 @@ function viewResult() {
     st.selected = Math.min(st.selected || 0, resp.plans.length - 1);
     const sel = resp.plans[st.selected];
     const jobs = sel.jobs.map(toViewJob);
+    const vp = viewProfile();
+    // 이 결과를 받은 뒤 내 정보가 바뀌었는가. 당시 값이 아예 없는 옛 기록은
+    // 지금 값으로 그릴 수밖에 없으므로, 단정하지 않고 그 사실을 밝힌다.
+    const profileDrift = st.profile
+      ? profileSignature(st.profile) !== profileSignature(currentProfile)
+      : !!st.profileUnknown;
     const h = historyEntries();
     const hIdx = h.findIndex(x => x.id === st.historyId);
     const hNo = hIdx >= 0 ? h.length - hIdx : null;
@@ -541,6 +612,9 @@ function viewResult() {
       ${resp.source === 'fallback' ? '<div style="height:10px"></div><div class="note warn">LLM 대신 서버 계산 규칙으로 만든 조합입니다. 추천 사유 문구가 단순할 수 있습니다.</div>' : ''}
       ${resp.source === null ? '<div style="height:10px"></div><div class="note warn">서버가 생성 방식(source)을 밝히지 않았습니다.</div>' : ''}
       ${resp.droppedPlans ? `<div style="height:10px"></div><div class="note warn">응답 중 ${resp.droppedPlans}개 안은 형식이 맞지 않아 표시하지 않았습니다.</div>` : ''}
+      ${profileDrift ? `<div style="height:10px"></div><div class="note warn profile-drift" role="note">${st.profile
+        ? '<b>지금의 내 정보와 다른 조건으로 받은 결과입니다.</b> 아래 시간표의 고정 일정·목표 금액은 이 결과를 받을 당시 값입니다.'
+        : '<b>이 기록에는 요청 당시 내 정보가 남아 있지 않습니다.</b> 당시 고정 일정을 알 수 없어 시간표에 그리지 않았습니다 — 지금의 고정 일정을 이 결과의 일부인 것처럼 보여 주지 않기 위해서입니다.'} 지금 조건으로 받으려면 <a href="#/">새로 추천받기</a>를 눌러 주세요.</div>` : ''}
       <div style="height:16px"></div>
       <div class="grid-3">
         ${resp.plans.map((p, i) => {
@@ -573,15 +647,15 @@ function viewResult() {
         <button class="btn" id="regen">🔄 재생성${st.pinned.length ? ' (고정 유지)' : ''}</button>
         <button class="btn primary" id="save">💾 이 시간표 저장</button>
       </div>
-      ${warningBlock(sel.warnings, profile)}
-      ${metricsRowServer(sel.metrics, profile)}
+      ${warningBlock(sel.warnings, vp)}
+      ${metricsRowServer(sel.metrics, vp)}
       <div style="height:16px"></div>
-      <div class="card">${renderTimetable(jobs, profile)}</div>
+      <div class="card">${renderTimetable(jobs, vp)}</div>
       ${slotsCard(resp.availableSlots)}
       <div style="height:16px"></div>
       <div class="card">
         <div class="card-title">알바 상세 <span class="hint">📌 고정: 이 알바는 유지하고 나머지만 재생성 · ✕ 제외: 빼고 다시</span></div>
-        ${jobs.map(j => jobItem(j, profile, { pinned: st.pinned.includes(j.id) || j.pinned, controls: 'result' })).join('')}
+        ${jobs.map(j => jobItem(j, vp, { pinned: st.pinned.includes(j.id) || j.pinned, controls: 'result' })).join('')}
       </div>
       <div class="note" style="margin-top:14px">${resp.requestId ? '요청 ID ' + esc(resp.requestId) + ' · ' : ''}${resp.generatedAt ? esc(resp.generatedAt) + ' 생성 · ' : ''}출처 ${SOURCE_LABEL[resp.source] || '미상'}${resp.contractVersion ? ' · 계약 ' + esc(resp.contractVersion) : ''}</div>
       ${disclosureBlock(resp.disclosures)}
@@ -632,7 +706,7 @@ function viewResult() {
           planType: plan.type,
           planLabel: plan.label,
           search: st.search,
-          profile: JSON.parse(JSON.stringify(profile)),
+          profile: JSON.parse(JSON.stringify(viewProfile())),
           source: st.response.source,
           jobSource: st.response.jobSource || null,
           requestId: st.response.requestId,
@@ -697,6 +771,9 @@ function viewSchedule(id) {
     const issues = validateCombo(work, profile);       // 로컬 산술 검증 (겹침 · 이동 · 상한)
     const badDays = new Set(issues.filter(i => i.day).map(i => i.day));
     const local = localWeekly(work);
+    /* 근무 시간을 손댄 시간표에는 서버 지표가 더 이상 맞지 않는다. 저장하면 dirty 는
+     * 풀리지만 sc.edited 로 남으므로, 다시 열어도 같은 사실을 계속 밝힌다. */
+    const editedMetrics = !legacy && (dirty || sc.edited === true);
     app().innerHTML = `
       <div class="page-head"><div class="eyebrow">Saved · ${new Date(sc.createdAt).toLocaleString('ko-KR')}</div><h1>${esc(sc.title)}</h1>
         <p>${esc(profile.role)} · 집 ${esc(profile.home)} · 목표 ${fmtWon(profile.goal)}${sc.planLabel ? ' · ' + esc(sc.planLabel) : ''}</p></div>
@@ -715,8 +792,8 @@ function viewSchedule(id) {
       </div>
       <div class="alerts">${issues.length ? issues.map(i => `<div class="alert">⚠ ${esc(i.msg)}</div>`).join('') : `<div class="alert ok">✓ 시간 겹침 · 이동 · 주간 상한 검증 통과 (브라우저 계산)</div>`}</div>
       ${!legacy && Array.isArray(sc.warnings) && sc.warnings.length ? warningBlock(sc.warnings, profile) : ''}
-      ${legacy ? metricsRowLegacy(comboMetrics(work, profile), profile) : metricsRowServer(sc.metrics || {}, profile, { stale: dirty })}
-      ${dirty ? `<div class="note warn" style="margin-top:10px">시간을 수정했습니다. 위 월 수입·실질 시급은 <b>저장 시점 서버 계산값</b>이며 자동으로 다시 계산하지 않습니다. 수정 기준 주 근무는 ${local.hours.toFixed(1)}시간 · 주급 ${fmtWon(local.pay)}입니다.</div>` : ''}
+      ${legacy ? metricsRowLegacy(comboMetrics(work, profile), profile) : metricsRowServer(sc.metrics || {}, profile, { stale: editedMetrics })}
+      ${editedMetrics ? `<div class="note warn edited-metrics" style="margin-top:10px">근무 시간을 수정한 시간표입니다${dirty ? '' : ' (수정 내용 저장됨)'}. 위 월 수입·실질 시급은 <b>추천 당시 서버 계산값</b>이며 자동으로 다시 계산하지 않습니다. 지금 시간 기준 주 근무는 ${local.hours.toFixed(1)}시간 · 주급 ${fmtWon(local.pay)}입니다.</div>` : ''}
       <div style="height:16px"></div>
       <div class="card">${renderTimetable(work, profile, { badDays })}</div>
       <div style="height:16px"></div>
@@ -735,7 +812,7 @@ function viewSchedule(id) {
       dirty = false; editing = false; toast('변경사항을 저장했습니다.'); draw();
     };
     $('#del').onclick = () => { if (confirm('이 스케줄을 삭제할까요?')) { Store.set('schedules', list.filter(s => s.id !== id)); toast('삭제했습니다.'); navigate('/my'); } };
-    $('#img').onclick = () => exportImage(sc, work, profile, $('#withcontact').checked, legacy);
+    $('#img').onclick = () => exportImage(sc, work, profile, $('#withcontact').checked, legacy, editedMetrics);
     app().onclick = e => {
       const rm = e.target.closest('[data-remove]');
       if (rm) { const i = work.findIndex(j => j.id === rm.dataset.remove); if (i >= 0) { work.splice(i, 1); dirty = true; draw(); } }
@@ -754,17 +831,17 @@ function viewSchedule(id) {
   draw();
 }
 
-async function exportImage(sc, jobs, profile, withContact, legacy) {
+async function exportImage(sc, jobs, profile, withContact, legacy, editedMetrics = false) {
   const wrap = $('#capwrap');
   const metricCells = legacy
     ? (() => { const m = comboMetrics(jobs, profile); return [
         ['예상 월 수입', fmtWon(m.monthly)], ['목표 달성률', Math.round(m.rate * 100) + '%'],
         ['주 근무 / 이동', `${m.workHours.toFixed(1)}h / ${fmtDur(m.travelMin)}`],
         ['실질 시급', Math.round(m.effectiveWage).toLocaleString('ko-KR') + '원']]; })()
-    : (() => { const m = sc.metrics || {}; return [
-        ['예상 월 수입', fmtMoney(m.monthlyIncome)], ['목표 달성률', fmtRate(m.targetAchievementRate)],
-        ['주 근무 / 이동', `${m.weeklyWorkHours == null ? '—' : m.weeklyWorkHours.toFixed(1) + 'h'} / ${m.weeklyTravelMinutes == null ? '—' : fmtDur(Math.round(m.weeklyTravelMinutes))}`],
-        ['실질 시급', m.effectiveHourlyWage == null ? '—' : Math.round(m.effectiveHourlyWage).toLocaleString('ko-KR') + '원']]; })();
+    : (() => { const m = sc.metrics || {}; const at = editedMetrics ? ' (수정 전)' : ''; return [
+        ['예상 월 수입' + at, fmtMoney(m.monthlyIncome)], ['목표 달성률' + at, fmtRate(m.targetAchievementRate)],
+        ['주 근무 / 이동' + at, `${m.weeklyWorkHours == null ? '—' : m.weeklyWorkHours.toFixed(1) + 'h'} / ${m.weeklyTravelMinutes == null ? '—' : fmtDur(Math.round(m.weeklyTravelMinutes))}`],
+        ['실질 시급' + at, m.effectiveHourlyWage == null ? '—' : Math.round(m.effectiveHourlyWage).toLocaleString('ko-KR') + '원']]; })();
 
   wrap.innerHTML = `<div class="capture" id="capture">
     <h2>${esc(sc.title)}</h2>
