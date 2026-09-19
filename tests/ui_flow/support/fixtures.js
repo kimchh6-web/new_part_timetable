@@ -36,13 +36,29 @@ function profileFixture(over = {}) {
 
 const searchFixture = (over = {}) => ({ count: 2, categories: ['카페·음식점'], priority: 'flex', ...over });
 
+/* 주간 응답의 travel 스키마 그대로다 (harness/weekly/plans.py 가 싣는 8개 키).
+ * 선택 필드 3개(legMinutes / originWalkMinutes / slackMinutes)까지 명시한다 —
+ * 어댑터가 없는 값을 null 로 두는 규칙은 tests/web-api-client.test.js 가 보므로,
+ * 여기서는 서버가 실제로 싣는 쪽을 쓴다.
+ *   legMinutes   = originWalkMinutes + transitMinutes + walkMinutes  (door-to-door 편도)
+ *   departAt     = 근무 시작 - legMinutes - bufferMinutes
+ *   slackMinutes = departAt - 그 날 빈 시간이 열리는 시각
+ * 아래 세 잡의 값은 모두 이 산술대로 손으로 계산해 넣었다. metrics 와 달리
+ * 일부러 어긋내지 않는다: 화면이 서버 leg 를 그대로 쓰는지 보려면 leg 자체가
+ * 말이 되어야 한다. 반대로 warnings 는 손으로 고른 목록이고 이 숫자에서
+ * 파생되지 않는다. originWalkMinutes 가 0 인 것은 고정 일정이 끝난 자리와 집에
+ * 데이터셋의 도보 값이 없기 때문이다(harness/weekly/travel.py).
+ */
 function travel(over = {}) {
   return {
     fromLocation: '강남역',
     transitMinutes: 30,
     walkMinutes: 13,
+    originWalkMinutes: 0,
+    legMinutes: 43,          // 0 + 30 + 13
+    slackMinutes: 2,         // 18:02 출발 - 18:00 (강남역 고정 일정 종료)
     bufferMinutes: 15,
-    departAt: '18:02',
+    departAt: '18:02',       // 19:00 - 43 - 15
     ...over,
   };
 }
@@ -100,7 +116,8 @@ function jobB(over = {}) {
     minWeeks: 8,
     benefits: ['교통비 지원'],
     assignedShifts: [
-      { day: 'SAT', start: '10:00', end: '15:00', travel: travel({ fromLocation: '사당', transitMinutes: 22, walkMinutes: 8, departAt: '09:15' }) },
+      // leg 0+22+8=30 · departAt 10:00-30-15=09:15 · slack 09:15-07:00(토 빈 시간 시작)=135
+      { day: 'SAT', start: '10:00', end: '15:00', travel: travel({ fromLocation: '사당', transitMinutes: 22, walkMinutes: 8, legMinutes: 30, slackMinutes: 135, departAt: '09:15' }) },
     ],
     weeklyHours: 5,
     weeklyPay: 54000,
@@ -130,7 +147,8 @@ function jobC(over = {}) {
     minWeeks: null,
     benefits: [],
     assignedShifts: [
-      { day: 'SUN', start: '13:00', end: '18:00', travel: travel({ fromLocation: '사당', transitMinutes: 35, walkMinutes: 6, departAt: '12:14' }) },
+      // leg 0+35+6=41 · departAt 13:00-41-15=12:04 · slack 12:04-07:00=304
+      { day: 'SUN', start: '13:00', end: '18:00', travel: travel({ fromLocation: '사당', transitMinutes: 35, walkMinutes: 6, legMinutes: 41, slackMinutes: 304, departAt: '12:04' }) },
     ],
     weeklyHours: 5,
     weeklyPay: 60000,

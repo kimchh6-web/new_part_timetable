@@ -155,6 +155,11 @@ test('저장 흐름: 저장하면 서버 plan 이 schemaVersion 2 로 그대로 
   assert.deepEqual(entry.metrics, F.responseFixture().plans[0].metrics);
   assert.deepEqual(entry.jobs.map(j => j.jobId), ['job_cp0095', 'job_st0042']);
   assert.deepEqual(entry.jobs[0].assignedShifts, F.jobA().assignedShifts);
+  // 응답에만 있고 화면 계산에는 쓰이지 않는 travel 선택 필드도 깎이지 않는다
+  const savedTravel = entry.jobs[0].assignedShifts[0].travel;
+  assert.equal(savedTravel.legMinutes, 43);
+  assert.equal(savedTravel.originWalkMinutes, 0);
+  assert.equal(savedTravel.slackMinutes, 2);
   assert.equal(page.hash(), '#/schedule/' + entry.id);
   assert.ok(!page.$('#modalbg'), '저장 후 모달이 닫혀야 한다');
 });
@@ -181,6 +186,16 @@ test('저장 흐름: 새 세션에서 다시 열어도 서버 지표와 배정 �
   assert.match(html, /치킨하우스 반반 노원점/);
   assert.match(html, /19:00 ~ 22:00/);
   assert.match(html, /18:02 출발/);
+  // 저장·재열람을 거쳐도 이동 블록은 서버 값으로 남는다 (leg 43 = 30+13 이라 합산 경로와 숫자는 같고,
+  // 필드 자체가 보존되는지는 아래 저장물 검사가 본다)
+  assert.match(html, /이동 43분/);
+  assert.ok(!html.includes('브라우저 추정 이동시간'));
+  const reopenedTravel = reopened.stored('schedules')[0].jobs[0].assignedShifts[0].travel;
+  assert.deepEqual(
+    { leg: reopenedTravel.legMinutes, originWalk: reopenedTravel.originWalkMinutes, slack: reopenedTravel.slackMinutes },
+    { leg: 43, originWalk: 0, slack: 2 },
+    '새 세션에서 읽어도 travel 선택 필드 3개가 그대로 남아야 한다',
+  );
   assert.ok(!html.includes('이전 버전에서 저장된'), '서버 기반 저장물을 옛 형식으로 취급하면 안 된다');
   assert.equal(reopened.calls.length, 0, '저장된 시간표를 여는 데 네트워크가 필요하면 안 된다');
 });
