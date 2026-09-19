@@ -54,6 +54,39 @@ reinstalls or re-points them.
 
 ## No console windows, and no orphans
 
+### The window belonged to the task's own root process
+
+The tasks used to run `pwsh.exe` directly. `pwsh.exe` is a **console-subsystem**
+executable, so Windows gives it a console the moment the task starts, and
+`-WindowStyle Hidden` cannot take that back — it is a hint applied to a window
+the PowerShell host already owns. That console was the CMD window the operator
+kept seeing, and closing it delivered `CTRL_CLOSE_EVENT` to everything attached
+to it, which is why both tasks recorded `lastResult 3221225786` (`0xC000013A`,
+`STATUS_CONTROL_C_EXIT`) and the whole server went down with the window.
+
+Making the *children* windowless (the next section) was a fix one level too low:
+it left the root untouched, so the window came back on every restart.
+
+Each task's action is now the GUI-subsystem interpreter
+`%LOCALAPPDATA%\Programs\Python\Python312\pythonw.exe`, running
+`scripts/public_supervisor_host.py --component web|tunnel`. Windows never gives
+a GUI-subsystem image a console, so there is no window to see and no console
+group for a close to travel through. The host starts the same
+`scripts/supervise-public.ps1` with `CREATE_NO_WINDOW`, gives it `NUL` for
+stdin, redirects its output to `.runtime/host-<component>.log`, and waits. It is
+standard library only, passes no credentials on the command line — the
+supervisor still reads `DAYTONA_API_KEY` from the user environment, which the
+host inherits — and refuses to start, with a line in that log, if `pwsh.exe` or
+the supervisor script cannot be found.
+
+The host also owns a job object with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, with
+a non-inheritable handle, and puts the supervisor in it. Terminating the task's
+root process therefore cannot leave a `pwsh`/`python`/`cloudflared` tree behind:
+Windows kills the job when the last handle closes, and process teardown closes
+it. That is the same mechanism as the per-supervisor job below, one level up.
+
+### Each supervisor's own children
+
 Both supervisors start their child with an explicit
 `ProcessStartInfo { UseShellExecute = false; CreateNoWindow = true }` (see
 `scripts/public-process.ps1`) rather than PowerShell's native-command pipeline,
@@ -77,11 +110,24 @@ failure between start and wait cannot leave one behind either.
 
 ## Restart on this PC
 
-Install/start/upgrade the tasks from the repository root. Run it from the same
-checkout the tasks were registered from: the installer only touches a task in `\`
-whose single action, executable, working directory and principal all match this
-checkout, and refuses anything else instead of overwriting it. Upgrading does not
-stop a running supervisor, so it is safe while the site is up.
+Install/start/upgrade/migrate the tasks from the repository root. Run it from the
+same checkout the tasks were registered from: the installer classifies each task
+in `\` as **current** (already the pythonw host action), **legacy** (exactly the
+previous `pwsh -NoProfile -WindowStyle Hidden -File …\supervise-public.ps1
+-Component …` action, at the same pwsh path, working directory and principal) or
+**foreign**, and only the first two are written. A foreign task is refused
+instead of overwritten, and both components are classified *before* either is
+touched, so a foreign task under one name cannot leave the other half migrated.
+
+Migrating a task also restarts it: `Set-ScheduledTask` leaves a running instance
+alone, and that instance is the one still holding the console window this change
+removes. The installer therefore stops the legacy instance, waits up to 30
+seconds for it to go, and starts the task again. If the old instance is still
+running after that wait it **fails with an error** rather than reporting a
+finished migration while the old console stays alive. Re-running the installer
+afterwards is safe: the new action is accepted as `current`. Upgrading a task
+that is already on the host action does not stop a running supervisor, so that
+case is still safe while the site is up.
 
 ```powershell
 pwsh -NoProfile -File scripts/install-public-tasks.ps1
@@ -108,7 +154,26 @@ the app or the tunnel, and the only process it terminates is one it started:
 pwsh -NoProfile -File scripts/test-no-console-child.ps1
 ```
 
-It verifies the child's exit code, that stdout and stderr are captured separately
+Focused check of the **top-level** host — the level the previous fix missed. It
+reads the PE subsystem of `pythonw.exe` (must be GUI; `python.exe` and `pwsh.exe`
+are checked to be console, so the check can tell them apart), then runs the real
+chain `pythonw` → a stand-in `pwsh` script → `ping 127.0.0.1` in a temp
+directory. No scheduled task is registered, and the only processes it terminates
+are ones it started:
+
+```powershell
+& "$env:LOCALAPPDATA\Programs\Python\Python312\python.exe" -m unittest tests.test_public_supervisor_host -v
+```
+
+It asserts `GetConsoleWindow() == 0` at **both** levels — the host from inside
+itself, and the supervisor it launched — that killing the host leaves neither the
+supervisor nor its grandchild behind, and that a GUI host outlives the console
+process that started it (a `cmd.exe` that stays alive, is confirmed alive, and is
+then destroyed outright). It also checks that the installer registers the same
+interpreter path this module names, and that bad arguments and missing
+prerequisites fail closed instead of being guessed.
+
+The child-level check below verifies the child's exit code, that stdout and stderr are captured separately
 and reach the log, that the child reports no visible console window
 (`GetConsoleWindow`/`IsWindowVisible` from inside the child), that disposing a
 running child terminates it, and that killing a stand-in supervisor leaves no
@@ -190,8 +255,22 @@ by the coordinator, not from this branch.
 Verified for the windowless change on 2026-09-19, off the production processes:
 all checks in `scripts/test-no-console-child.ps1` and
 `scripts/test-public-task-definition.ps1` pass, and the child console probe
-reported `console-handle=0 console-visible=False`. Not verified from this branch:
-that the live supervisors show no window on screen after the next restart, and
-that a real `Stop-ScheduledTask` leaves no python or cloudflared behind. The task
-definition itself is unchanged, so the running supervisors keep the old code
-until the coordinator restarts them.
+reported `console-handle=0 console-visible=False`.
+
+Verified for the GUI-host change on 2026-09-19, also off the production
+processes: all 10 checks in `tests/test_public_supervisor_host.py` pass. In a
+live chain the host reported `console_window=0` and the supervisor it launched
+reported `console-handle=0 console-visible=False`; killing the host removed both
+the supervisor and its grandchild; and the host survived the outright
+destruction of the `cmd.exe` that had started it. The read-only classification
+dry-run put both live tasks at `legacy`, so the migration path recognises them
+rather than refusing them, and `Get-Command pwsh.exe` resolves to exactly the
+path those tasks hold.
+
+Not verified from this branch: that the live supervisors show no window on screen
+after migration — that is an on-screen observation only the operator can make —
+that the migrated production tasks and the public API survive terminating an
+owned initiating process, and that a real `Stop-ScheduledTask` leaves no python
+or cloudflared behind. The production tasks still hold the legacy pwsh action at
+the time of this change; the coordinator owns the migration and the live
+verification.
