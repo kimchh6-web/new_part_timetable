@@ -326,3 +326,26 @@ input:disabled, select:disabled { background: var(--surface-2); color: var(--mut
 .hi-jobs span { font-size: 12px; padding-left: 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .hi-cond { font-size: 11px; color: var(--muted); margin-top: 6px; }
 .hist-empty { text-align: center; color: var(--muted); font-size: 12px; padding: 24px 8px; line-height: 1.6; }
+
+/* ---------- 합성 데이터 고지 ---------- */
+.synth-note { display: flex; gap: 8px; align-items: baseline; line-height: 1.5; }
+.synth-note b { white-space: nowrap; }
+
+/* ---------- API 에러 / 경고 ---------- */
+.api-error { border-color: #fca5a5; }
+.api-error .ae-code { font-size: 11px; font-weight: 800; letter-spacing: .08em; color: var(--danger); }
+.api-error .ae-msg { font-size: 18px; font-weight: 700; margin-top: 4px; }
+.api-error .ae-stages { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-top: 16px; }
+@media (max-width: 860px) { .api-error .ae-stages { grid-template-columns: repeat(2, 1fr); } }
+.api-error .ae-stages > div { background: var(--surface-2); border-radius: 10px; padding: 10px 12px; }
+.api-error .ae-stages .k { font-size: 11px; color: var(--muted); }
+.api-error .ae-stages .v { font-weight: 800; font-size: 16px; }
+
+.alert.warn { background: #fef3c7; color: #92400e; }
+.alert.warn a { color: #7c2d12; text-decoration: underline; font-weight: 700; }
+.warn-list { margin-bottom: 0; }
+.plan-warn { font-size: 12px; font-weight: 700; color: #92400e; background: #fef3c7; border-radius: 8px; padding: 5px 8px; margin-bottom: 8px; }
+
+.badge.legacy { background: var(--surface-2); color: var(--muted); }
+.metrics-row.stale .metric { opacity: .72; }
+.hist-item.legacy { opacity: .7; cursor: default; }
