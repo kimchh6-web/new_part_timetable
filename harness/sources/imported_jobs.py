@@ -49,7 +49,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 from urllib.parse import urlsplit
 
-from ..weekly.constants import CATEGORIES, DAYS, REGIONS
+from ..weekly.constants import DAYS, REGIONS
 
 __all__ = [
     "ALLOWED_SOURCE_PATHS",
@@ -105,7 +105,6 @@ FUTURE_SKEW_SECONDS = 300
 
 _DAYS = set(DAYS)
 _REGIONS = set(REGIONS)
-_CATEGORIES = set(CATEGORIES)
 
 #: The only hosts a row may cite. A posting that points anywhere else is not
 #: one of the two providers this integration was reviewed for, so it is
@@ -494,8 +493,20 @@ def _reject_reason(
         # says 서울, the region name is not evidence of the region the
         # estimator means, so the row stays ineligible.
         return "ADDRESS_NOT_SEOUL"
-    if row.get("category") not in _CATEGORIES:
-        return "UNSUPPORTED_CATEGORY"
+    category = row.get("category")
+    if category is not None and not isinstance(category, str):
+        # Category is soft, but a non-string one is a parse artefact, and the
+        # weekly category filter would raise on an unhashable value.
+        return "MISSING_REQUIRED_FIELDS"
+    # An unknown or unmapped category is *not* a rejection. Nothing about the
+    # category decides whether the shift can be worked: the wage, the weekday
+    # shifts, the recurrence, the region and the provenance do, and those are
+    # all checked above. The collector reads 모집직종 when the posting labels it
+    # and leaves ``None`` otherwise, so demanding one of the demo's seven would
+    # reject feasible rows over a label the provider never published — and
+    # filling one in would be exactly the invention this lane forbids. The row
+    # travels with its category unknown; the weekly category filter is where an
+    # explicit ``search.categories`` excludes it.
 
     flexibility = row.get("scheduleFlexibility")
     if flexibility is not None and not isinstance(flexibility, dict):

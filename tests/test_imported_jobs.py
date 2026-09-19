@@ -290,9 +290,92 @@ class RowRejectionTests(ArtifactCase):
         self.assertEqual(self.reason(address="부산 사상구 사당로 1"), "ADDRESS_NOT_SEOUL")
         self.assertEqual(self.reason(address=None), "MISSING_REQUIRED_FIELDS")
 
-    def test_a_category_outside_the_demo_taxonomy_is_not_invented(self):
-        self.assertEqual(self.reason(category="기타"), "UNSUPPORTED_CATEGORY")
-        self.assertEqual(self.reason(category=None), "UNSUPPORTED_CATEGORY")
+    def test_an_unknown_category_stays_unknown_instead_of_rejecting_the_row(self):
+        # Category is soft: it decides nothing about whether the shift can be
+        # worked, and the collector leaves it None when the posting has no
+        # 모집직종 label. Neither an unmapped label nor a missing one is a
+        # rejection, and neither gets a category invented for it.
+        for category in ("기타", "주방보조", None):
+            with self.subTest(category=category):
+                self.assertIsNone(self.reason(category=category))
+        loaded = self.load(artifact([row(category=None)]))
+        self.assertEqual(len(loaded["jobs"]), 1)
+        self.assertIsNone(loaded["jobs"][0].get("category"))
+        # A non-string category is a parse artefact, not a soft unknown.
+        self.assertEqual(self.reason(category={"name": "카페"}), "MISSING_REQUIRED_FIELDS")
+
+    def test_a_collector_shaped_row_needs_hard_facts_but_not_a_category(self):
+        """The collector's own row shape, written out rather than imported.
+
+        ``harness.sources.public_jobs`` lives in another branch, so this case
+        reproduces the envelope and row keys ``parse.py`` emits verbatim — no
+        ``payDetail``, ``scheduleFlexibility`` an empty dict, ``category`` from
+        the posting's 모집직종 label and ``None`` when it has none.
+        """
+
+        def collected(**overrides: Any) -> dict[str, Any]:
+            record: dict[str, Any] = {
+                "id": "albamon_1001",
+                "platform": "알바몬",
+                "status": "recruiting",
+                "statusEvidence": "JSON-LD validThrough",
+                "title": "카페 홀 서빙",
+                "company": "테스트 카페",
+                "location": "사당",
+                "address": "서울 동작구 사당로 1",
+                "hourlyWage": 11000,
+                "shifts": [{"day": "SAT", "start": "10:00", "end": "14:00"}],
+                "shiftPattern": "토, 일요일",
+                "workPeriod": "6개월 이상",
+                "category": None,  # no 모집직종 label on the posting
+                "qualifications": {"licenses": [], "requirements": [], "preferred": []},
+                "scheduleFlexibility": {},
+                "sourceUrl": URL,
+                "wagePublished": "시급 11,000원",
+                "schedulePublished": {
+                    "daysText": "토, 일요일",
+                    "hoursText": "10:00 ~ 14:00",
+                    "workHoursText": None,
+                },
+                "employmentType": ["PART_TIME"],
+                "postedAt": "2026-09-15",
+                "validThrough": "2026-12-31",
+                "description": "주말 홀 서빙 업무입니다.",
+                "provenance": {
+                    "provider": "albamon",
+                    "source_url": URL,
+                    "fetched_at": FRESH,
+                    "data_mode": DATA_MODE_LIVE,
+                },
+                "missing_fields": ["category", "walkMinutes"],
+                "scheduling_eligible": True,
+            }
+            record.update(overrides)
+            return record
+
+        # missing category alone: accepted, and still unknown on the way out.
+        loaded = self.load(artifact([collected()]))
+        self.assertEqual(len(loaded["jobs"]), 1, loaded["rejected"])
+        job = loaded["jobs"][0]
+        self.assertIsNone(job.get("category"))
+        # …and the walk figure the posting never published stays labelled.
+        self.assertEqual(job["walkMinutes"], DEMO_WALK_MINUTES)
+        self.assertTrue(job["walkMinutesEstimated"])
+
+        # the hard facts are still hard, on this exact shape
+        for overrides, expected in (
+            ({"hourlyWage": None}, "PAY_NOT_HOURLY"),
+            ({"shifts": []}, "NO_EXPLICIT_SHIFTS"),
+            ({"shiftPattern": None, "workPeriod": None}, "UNVERIFIED_RECURRENCE"),
+            ({"address": "경기 성남시 1"}, "ADDRESS_NOT_SEOUL"),
+            ({"location": "부천역", "address": "경기 부천시 1"}, "UNSUPPORTED_LOCATION"),
+            ({"status": "closed"}, "NOT_RECRUITING"),
+            ({"validThrough": "2026-09-18"}, "EXPIRED_POSTING"),
+        ):
+            with self.subTest(overrides=overrides):
+                rejected = self.load(artifact([collected(**overrides)]))
+                self.assertEqual(rejected["jobs"], [])
+                self.assertEqual(rejected["rejected"][0]["reason"], expected)
 
     def test_required_canonical_fields_must_be_present(self):
         for field in ("id", "platform", "title", "company", "sourceUrl"):
