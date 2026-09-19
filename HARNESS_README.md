@@ -1,52 +1,86 @@
-# Agent Harness workspace
+# Scheduler Harness — canonical demo dataset
 
-Branch: `feature/agent-harness-daytona-nosana`.
+Harness implementation on `feature/agent-harness-daytona-nosana`; frontend/backend and the original repository README are untouched.
 
-This initial commit creates the isolated workspace only. Discovery, provider integrations, and recommendations are not implemented in this commit. Existing frontend/backend work and the repository README are preserved.
+## Dataset
 
-## Scope
+`harness/fixtures/jobs.json` is a byte-for-byte copy of the supplied `C:\Users\user\Downloads\jobs (1).json`. It contains 600 synthetic postings from six platforms, not live vacancies. SHA-256: `47c871b33e3a1597bb18c38a08d7d085303e466e5fab3bd2d59f2321e91ca0db`.
 
-```text
-User Context
-    -> Job Discovery
-    -> Daytona Execution
-    -> Job Normalization
-    -> Constraint Filtering
-    -> Preference / Capability Matching
-    -> Ranking
-    -> Recommendation JSON
+All 600 records were inspected: 546 recruiting, 31 closed, 23 paused; seven categories; 1,361 weekday shifts, including 109 overnight shifts. Top-level schema is consistent with no null/missing fields. Nested `payDetail.payDay` is null in 293 rows; some contact links are null. `hourlyWage` is numeric (10,390–19,700 KRW); `dailyPay` is a boolean, never an amount. Qualification licenses, general requirements, and preferences remain distinct. Rich fields and original structured shifts are preserved during normalization.
+
+## Run
+
+For the verified three-case live pitch, run `python pitch_demo.py`. See
+[the 3-minute presentation guide](examples/PITCH.md). It uses real Daytona
+execution for all three cases and saves full responses under `.runtime/pitch/`.
+This is a daily-schedule CLI demo; the newer weekly HTTP API contract is not
+implemented. The legacy unit suite still contains outdated fixture expectations
+and is not fully passing; the three live pitch cases passed independently.
+
+Python 3.10+:
+
+```bash
+python -m pip install -r requirements.txt
+# Set DAYTONA_API_KEY in the process environment.
+python demo.py
+python demo.py --json
+python -m unittest discover -s tests -v
+python examples/inspect_dataset.py
 ```
 
-The intended backend entrypoint is `run_harness(user_context)`. The implementation will preserve a shared normalized-job contract and return evidence-backed recommendations without inventing unknown job data.
+The default demo executes actual planning in Daytona. `--local` is explicit development mode and reports `runtime_provider: local`; a Daytona failure never silently falls back to local. Optional environment settings are documented in `.env.example`, which is not auto-loaded.
 
-## Sponsor architecture
+## Backend contract
+
+```python
+from harness import run_harness
+
+payload = {
+    "start_location": "서울 강남",
+    "home_location": "서울 용산",
+    "availability": {"start": "14:00", "end": "20:00"},
+    "weekday": "MON",
+    "allow_negotiable_proposals": True,
+    "travel_preferences": ["퇴근 경로 인근"],
+    "weekly_income_target": 250000,
+    "skills": ["POS 경험 6개월", "보건증"],
+    "preferred_jobs": ["의류 행사", "매장 정리"],
+    "avoid_jobs": ["설거지", "주방 보조"],
+}
+plan = run_harness(payload)  # Synchronous; returns a JSON-serializable dict.
+```
+
+The output has `schedule` (travel/job/travel), `summary`, `recommendation`, and `meta`. Job blocks include the source ID, platform, company, address, hourly wage, income and source URL. Scores are 0–1. Weekly progress means this day's gross estimated earnings divided by the weekly target; prior earnings, taxes, unpaid breaks and allowances are not inferred. For daily-pay postings the available hourly wage is used only as an explicitly disclosed estimate.
+
+An async backend can run this synchronous entrypoint in a thread (`await asyncio.to_thread(run_harness, payload)`). List fields accept simple comma/newline-separated strings. This is not a whole-paragraph NLP parser. Invalid user input raises `ValueError`; invalid job records are skipped. No candidates returns an empty schedule and meaningful metadata.
+
+## Scheduling policy — important for the presentation
+
+Published shifts are fixed by default, including negotiable postings. With the supplied dataset, 14:00–20:00 availability and the demo travel buffers, **there are zero strictly feasible published shifts on every weekday**. The harness must report this honestly.
+
+The primary demo explicitly sets `allow_negotiable_proposals: true`, using the PM-permitted limited adjustment policy: only `scheduleFlexibility.timeNegotiable == true` shifts may be delayed just enough to arrive, by at most 120 minutes. Duration is unchanged, the weekday is unchanged, and the trip home must still fit before 20:00. Original start/end values remain in the output. The resulting schedule is a **proposal requiring employer confirmation**, not a confirmed work shift. Set the flag to false to demonstrate strict empty-result handling.
+
+The target weekday comes from an explicit date or weekday; when absent it uses the single `DEMO_DAY` setting in `harness/config.py`. Same-day planning only; overnight shifts are not fitted into this daytime demo.
+
+Travel is a transparent demonstration estimate: **30 minutes base transit + the posting's `walkMinutes`, per leg**. `travel_estimate_mode: demo_estimator` identifies this assumption. It is not live routing and does not verify commute-route, transfer, or distance preferences. Unknown age, general duties and future multiweek commitments are disclosed rather than invented; missing mandatory licenses are rejected. Explicit supplied constraints are enforced.
+
+## Execution boundary
 
 ```text
 Daytona = Agent Execution Plane
 Nosana  = Optional AI Reasoning / Inference Plane
+
+run_harness(input)
+  -> parse user context
+  -> DaytonaScheduleExecutionRuntime.execute()
+       -> JsonJobSource loads the canonical jobs.json
+       -> normalize and preserve rich source data
+       -> recruiting / weekday / shift / travel / qualification / avoid gates
+       -> candidate timelines and gross income
+  -> preference / capability ranking
+  -> SchedulePlan JSON
 ```
 
-Daytona must be in the real runtime path:
+Daytona is where the scheduling agent executes its planning tools. One sandbox is reused through an ignored ID-only `.runtime/` cache or `DAYTONA_SANDBOX_ID`. Execution metadata reports the actual sandbox, process exit code and remote platform. Credentials remain on the controller.
 
-```text
-Harness
-    -> DaytonaJobDiscoveryRuntime.discover(user_context)
-    -> [Daytona: Job Source Adapter -> Scraping / Parsing / Normalization]
-    -> NormalizedJob[]
-    -> [Harness Core: Constraint Filter -> Match -> Rank]
-    -> Recommendation JSON
-```
-
-External interaction and execution belong to Daytona. Recommendation decisions belong to Harness Core. A failed live source must use a clearly labelled fixture adapter inside Daytona; local-only execution must never be presented as a Daytona success.
-
-Nosana is optional. Missing credentials, network errors, timeouts, or inference failures must fall back to deterministic weighted ranking. Inference may rank collected jobs and select supporting evidence; it must not create postings or override hard constraints.
-
-## Ownership
-
-- `harness/`: core, runtime, source adapters, normalizer, matching, recommender, fixtures.
-- `tests/`: harness tests.
-- `examples/`: backend usage and demo inputs.
-- `demo.py`: future E2E demo entrypoint; currently a setup notice only.
-- `HARNESS_README.md`: harness-specific instructions.
-
-Do not modify frontend/backend directories without explicit integration authorization. Keep this hackathon implementation narrow: one reusable Daytona sandbox, one live source, fixture fallback, deterministic ranking, and optional Nosana inference.
+Nosana is optional and cannot alter job facts, schedules, or hard constraints. Missing credentials or inference errors select deterministic weighted ranking. No live scraping, browser, map API, database, persistence system, or multi-agent runtime is implemented.

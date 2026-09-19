@@ -1,0 +1,84 @@
+{
+  "_meta": {
+    "synthetic": true,
+    "label": "SYNTHETIC MOCK DATA - NOT REAL VACANCIES",
+    "description": "Hand-authored mock postings for the MVP demo. Every posting, shift time, pay figure and travel estimate is invented. Nothing here was scraped, fetched or looked up on a map service.",
+    "scenario": {
+      "start_location": "서울 강남",
+      "home_location": "서울 용산"
+    },
+    "travel_note": "travel_from_start_min / travel_to_home_min are fixed fixture values for the 서울 강남 → job → 서울 용산 scenario only. They are not real route estimates and are not valid for any other start/home pair."
+  },
+  "jobs": [
+    {
+      "id": "job-01",
+      "title": "의류 매장 단기 정리",
+      "location": "역삼",
+      "start": "14:40",
+      "end": "18:40",
+      "hourly_pay": 13000,
+      "category": "store",
+      "description": "상품 정리 및 고객 안내, POS 사용",
+      "required_skills": [],
+      "preferred_skills": ["POS"],
+      "travel_from_start_min": 40,
+      "travel_to_home_min": 40
+    },
+    {
+      "id": "job-02",
+      "title": "편의점 진열 보조",
+      "location": "삼성",
+      "start": "15:00",
+      "end": "18:00",
+      "hourly_pay": 11500,
+      "category": "convenience",
+      "description": "음료 진열과 매장 정리, 간단한 계산 업무",
+      "required_skills": [],
+      "preferred_skills": ["POS"],
+      "travel_from_start_min": 35,
+      "travel_to_home_min": 45
+    },
+    {
+      "id": "job-03",
+      "title": "백화점 행사 판매 지원",
+      "location": "신사",
+      "start": "15:40",
+      "end": "19:40",
+      "hourly_pay": 14000,
+      "category": "event",
+      "description": "행사장 의류 판매 보조 및 고객 응대",
+      "required_skills": [],
+      "preferred_skills": ["POS"],
+      "travel_from_start_min": 40,
+      "travel_to_home_min": 40
+    },
+    {
+      "id": "job-04",
+      "title": "식당 주방 설거지 보조",
+      "location": "역삼",
+      "start": "16:00",
+      "end": "19:00",
+      "hourly_pay": 12000,
+      "category": "kitchen",
+      "description": "저녁 영업시간 주방 설거지와 정리",
+      "required_skills": ["보건증"],
+      "preferred_skills": [],
+      "travel_from_start_min": 30,
+      "travel_to_home_min": 35
+    },
+    {
+      "id": "job-05",
+      "title": "카페 마감 바리스타",
+      "location": "논현",
+      "start": "15:00",
+      "end": "19:00",
+      "hourly_pay": 12500,
+      "category": "cafe",
+      "description": "음료 제조와 마감 청소",
+      "required_skills": ["바리스타 자격증"],
+      "preferred_skills": ["POS"],
+      "travel_from_start_min": 35,
+      "travel_to_home_min": 40
+    }
+  ]
+}
