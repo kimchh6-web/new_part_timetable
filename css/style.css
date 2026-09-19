@@ -349,3 +349,16 @@ input:disabled, select:disabled { background: var(--surface-2); color: var(--mut
 .badge.legacy { background: var(--surface-2); color: var(--muted); }
 .metrics-row.stale .metric { opacity: .72; }
 .hist-item.legacy { opacity: .7; cursor: default; }
+
+/* 로컬 검증에서 한 번에 여러 건이 걸렸을 때, 첫 줄 아래로 나머지를 전부 보여준다 */
+.api-error .ae-problems { margin: 10px 0 0; padding-left: 18px; font-size: 13px; color: var(--text); }
+.api-error .ae-problems li { margin: 3px 0; }
+
+/* 서버가 스스로 밝힌 계산 전제 — 기본은 접혀 있고, 펼치면 문장 그대로 */
+.disclosures { margin-top: 10px; font-size: 12px; color: var(--muted); background: var(--surface-2); border-radius: 10px; padding: 8px 12px; }
+.disclosures summary { cursor: pointer; font-weight: 700; }
+.disclosures ul { margin: 8px 0 2px; padding-left: 18px; }
+.disclosures li { margin: 4px 0; line-height: 1.55; }
+
+/* 서버 값이 아니라 화면에서 더한 값임을 밝히는 표시 */
+.js b span[title] { color: var(--muted); font-weight: 700; cursor: help; }

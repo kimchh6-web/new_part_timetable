@@ -50,7 +50,66 @@ const WARNING_LABEL = {
   BELOW_TARGET: '목표 금액에 못 미칩니다',
   SHORT_PERIOD: '단기 공고입니다',
   AGE_UNVERIFIED: '연령 조건을 확인하지 못했습니다',
+  // 계약 5종 밖이지만 서버(harness/weekly)가 실제로 내려보내는 코드들
+  HOLIDAY_PAY_NOT_INCLUDED: '주휴수당은 수입에 넣지 않았습니다',
+  QUALIFICATIONS_UNVERIFIED: '자격 요건을 확인하지 못했습니다',
+  NON_HOURLY_PAY: '시급제가 아닌 급여입니다',
 };
+
+/* =====================================================================
+ * 고정·제외·재생성 상태 전이
+ *
+ * 화면에서 떼어내 순수 함수로 둔다. 이 네 개가 "고정한 알바는 유지하고
+ * 나머지만 다시" 를 실제로 지키는 부분이라, 브라우저 없이도 검증할 수 있어야 한다.
+ * ===================================================================*/
+const MAX_SEEN_PLAN_IDS = 30;
+
+/** 요청에 실을 재생성 페이로드. fresh 면 "이미 본 조합" 을 비워 처음부터 다시 뽑는다. */
+function regeneratePayload(st, opts = {}) {
+  return {
+    pinned: [...(st.pinned || [])],
+    excluded: [...(st.excluded || [])],
+    previousPlanHashes: opts.fresh ? [] : [...(st.seenPlanIds || [])],
+  };
+}
+
+/**
+ * 📌 토글. 추천 개수를 넘겨 고정하려 하면 거부한다(서버의 PINNED_EXCEEDS_COUNT 와 같은 규칙).
+ * 고정한 알바는 제외 목록에서 빠진다 — 한 공고가 두 목록에 동시에 있을 수 없다.
+ */
+function togglePin(st, id) {
+  const pinned = st.pinned || [];
+  const excluded = st.excluded || [];
+  if (pinned.includes(id)) {
+    return { ok: true, pinnedNow: false, pinned: pinned.filter(x => x !== id), excluded: [...excluded] };
+  }
+  const limit = Math.max(1, Math.min(3, Number(st.search && st.search.count) || 1));
+  if (pinned.length >= limit) {
+    return { ok: false, limit, pinnedNow: false, pinned: [...pinned], excluded: [...excluded] };
+  }
+  return { ok: true, pinnedNow: true, pinned: [...pinned, id], excluded: excluded.filter(x => x !== id) };
+}
+
+/** ✕ 제외. 고정돼 있었다면 고정이 풀린다. */
+function excludeJob(st, id) {
+  return {
+    pinned: (st.pinned || []).filter(x => x !== id),
+    excluded: [...new Set([...(st.excluded || []), id])],
+  };
+}
+
+/** 이미 본 조합 누적 — 중복 없이, 최근 것부터 MAX_SEEN_PLAN_IDS 개까지. */
+function mergeSeenPlanIds(seen, ids) {
+  return [...new Set([...(seen || []), ...(ids || [])])].slice(-MAX_SEEN_PLAN_IDS);
+}
+
+/* 저장 데이터가 프로필을 잃었어도 목록 화면 전체가 죽지 않게 한다. */
+function safeProfile(p) {
+  const base = { role: '', home: '', minBlock: 2, night: true, want15: false, goal: 0, age: null, schedule: {} };
+  const out = { ...base, ...(p && typeof p === 'object' ? p : {}) };
+  if (!out.schedule || typeof out.schedule !== 'object') out.schedule = {};
+  return out;
+}
 
 /* ---------- 라우터 ---------- */
 const routes = {
@@ -72,8 +131,10 @@ function router() {
   if (!profile && hash !== '/onboarding') return viewOnboarding();
   (routes[hash] || viewHome)();
 }
-window.addEventListener('hashchange', router);
-window.addEventListener('DOMContentLoaded', router);
+if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
+  window.addEventListener('hashchange', router);
+  window.addEventListener('DOMContentLoaded', router);
+}
 
 /* =====================================================================
  * 온보딩
@@ -313,33 +374,37 @@ function viewResult() {
   st.seenPlanIds = st.seenPlanIds || [];
 
   function fromHistory(h) {
-    return { search: h.search, pinned: h.pinned || [], excluded: h.excluded || [], seenPlanIds: [], selected: 0, response: h.response, historyId: h.id, error: null };
+    return { search: h.search || Store.get('lastSearch') || { count: 2, categories: [], priority: 'wage' }, pinned: h.pinned || [], excluded: h.excluded || [], seenPlanIds: [], selected: 0, response: h.response, historyId: h.id, error: null };
   }
 
   /* ---------- 서버 호출 ---------- */
   const run = async (opts = {}) => {
     if (busy) return;
+    if (typeof WeeklyApi === 'undefined') {
+      st.error = { code: 'NETWORK', message: 'API 클라이언트(js/api-client.js)를 불러오지 못했습니다. 새로고침해 주세요.', details: null, suggestions: [], retryable: true };
+      Session.set(st); drawError(); return;
+    }
     busy = true;
     st.error = null;
     Session.set(st);
     drawLoading(opts);
+    const startedAt = location.hash;
     try {
-      const { request, response } = await WeeklyApi.requestRecommendations(profile, st.search, {
-        pinned: st.pinned,
-        excluded: st.excluded,
-        previousPlanHashes: opts.fresh ? [] : st.seenPlanIds,
-      });
+      const { request, response } = await WeeklyApi.requestRecommendations(
+        profile, st.search, regeneratePayload(st, opts));
       st.request = request;
       st.response = response;
-      st.seenPlanIds = [...new Set([...st.seenPlanIds, ...WeeklyApi.planIds(response)])].slice(-30);
+      st.seenPlanIds = mergeSeenPlanIds(st.seenPlanIds, WeeklyApi.planIds(response));
       st.selected = 0;
       st.historyId = pushHistory({ search: st.search, pinned: st.pinned, excluded: st.excluded, response });
       Session.set(st);
-      draw();
+      // 응답을 기다리는 동안 다른 화면으로 갔다면 그 화면을 덮어쓰지 않는다.
+      // 결과는 Session 에 남아 있으므로 /result 로 돌아오면 그대로 보인다.
+      if (location.hash === startedAt) draw();
     } catch (e) {
       st.error = { code: e.code || 'NETWORK', message: e.message, details: e.details || null, suggestions: e.suggestions || [], retryable: e.retryable !== false };
       Session.set(st);
-      drawError();
+      if (location.hash === startedAt) drawError();
     } finally {
       busy = false;
     }
@@ -361,7 +426,7 @@ function viewResult() {
             <div class="hi-top"><span class="hi-no">#${no}</span><span class="hi-time">${time}</span><button class="hi-del" data-hdel="${e.id}" title="삭제">✕</button></div>
             <div class="hi-money">${fmtMoney(best.metrics.monthlyIncome)} <small>${fmtRate(best.metrics.targetAchievementRate)}</small></div>
             <div class="hi-jobs">${best.jobs.map(j => `<span style="border-left:3px solid ${CATEGORY_COLORS[j.category] || 'var(--border)'}">${esc(j.company || j.title || j.jobId)}</span>`).join('')}</div>
-            <div class="hi-cond">${e.search.count}개 · ${PRIORITY_LABEL[e.search.priority] || ''} 우선 · ${e.search.categories.length ? e.search.categories.length + '개 카테고리' : '전체'}${(e.pinned || []).length ? ' · 📌' + e.pinned.length : ''}${(e.excluded || []).length ? ' · ✕' + e.excluded.length : ''}</div>
+            <div class="hi-cond">${(e.search || {}).count || '?'}개 · ${PRIORITY_LABEL[(e.search || {}).priority] || ''} 우선 · ${((e.search || {}).categories || []).length ? e.search.categories.length + '개 카테고리' : '전체'}${(e.pinned || []).length ? ' · 📌' + e.pinned.length : ''}${(e.excluded || []).length ? ' · ✕' + e.excluded.length : ''}</div>
           </div>`;
         }
         return `<div class="hist-item legacy" data-hlegacy="${e.id}">
@@ -426,6 +491,7 @@ function viewResult() {
       <div class="card api-error" role="alert">
         <div class="ae-code">${esc(e.code)}</div>
         <div class="ae-msg">${esc(e.message)}</div>
+        ${(d.problems || []).length > 1 ? `<ul class="ae-problems">${d.problems.map(pr => `<li>${esc(pr.message)}</li>`).join('')}</ul>` : ''}
         ${stageRows.length ? `<div class="ae-stages">${stageRows.map(([k, v]) => `<div><div class="k">${k}</div><div class="v">${v.toLocaleString('ko-KR')}건</div></div>`).join('')}</div>` : ''}
         ${(e.suggestions || []).length ? `<div class="section-label">이렇게 바꿔 볼 수 있습니다</div>
           <div class="chips">${e.suggestions.map((s, i) => `<button class="chip" data-sugg="${i}">${esc(s.label || s.type)}</button>`).join('')}</div>` : ''}
@@ -473,6 +539,7 @@ function viewResult() {
       </div>
       ${syntheticNotice()}
       ${resp.source === 'fallback' ? '<div style="height:10px"></div><div class="note warn">LLM 대신 서버 계산 규칙으로 만든 조합입니다. 추천 사유 문구가 단순할 수 있습니다.</div>' : ''}
+      ${resp.source === null ? '<div style="height:10px"></div><div class="note warn">서버가 생성 방식(source)을 밝히지 않았습니다.</div>' : ''}
       ${resp.droppedPlans ? `<div style="height:10px"></div><div class="note warn">응답 중 ${resp.droppedPlans}개 안은 형식이 맞지 않아 표시하지 않았습니다.</div>` : ''}
       <div style="height:16px"></div>
       <div class="grid-3">
@@ -516,7 +583,8 @@ function viewResult() {
         <div class="card-title">알바 상세 <span class="hint">📌 고정: 이 알바는 유지하고 나머지만 재생성 · ✕ 제외: 빼고 다시</span></div>
         ${jobs.map(j => jobItem(j, profile, { pinned: st.pinned.includes(j.id) || j.pinned, controls: 'result' })).join('')}
       </div>
-      <div class="note" style="margin-top:14px">${resp.requestId ? '요청 ID ' + esc(resp.requestId) + ' · ' : ''}${resp.generatedAt ? esc(resp.generatedAt) + ' 생성' : ''} · 출처 ${resp.source === 'fallback' ? '서버 규칙 계산' : 'LLM'}</div>
+      <div class="note" style="margin-top:14px">${resp.requestId ? '요청 ID ' + esc(resp.requestId) + ' · ' : ''}${resp.generatedAt ? esc(resp.generatedAt) + ' 생성 · ' : ''}출처 ${SOURCE_LABEL[resp.source] || '미상'}${resp.contractVersion ? ' · 계약 ' + esc(resp.contractVersion) : ''}</div>
+      ${disclosureBlock(resp.disclosures)}
     </div></div>`;
 
     bindSidebar();
@@ -529,18 +597,15 @@ function viewResult() {
     app().onclick = e => {
       const pin = e.target.closest('[data-pin]'); const ex = e.target.closest('[data-exclude]');
       if (pin) {
-        const id = pin.dataset.pin;
-        const already = st.pinned.includes(id);
-        if (!already && st.pinned.length >= (st.search.count || 1)) { toast(`고정은 추천 개수(${st.search.count}개)까지만 가능합니다.`); return; }
-        st.pinned = already ? st.pinned.filter(x => x !== id) : [...st.pinned, id];
-        st.excluded = st.excluded.filter(x => x !== id);
+        const next = togglePin(st, pin.dataset.pin);
+        if (!next.ok) { toast(`고정은 추천 개수(${next.limit}개)까지만 가능합니다.`); return; }
+        st.pinned = next.pinned; st.excluded = next.excluded;
         Session.set(st); draw();
-        toast(already ? '고정을 해제했습니다.' : '고정했습니다. 재생성 시 유지됩니다.');
+        toast(next.pinnedNow ? '고정했습니다. 재생성 시 유지됩니다.' : '고정을 해제했습니다.');
       }
       if (ex) {
-        const id = ex.dataset.exclude;
-        st.excluded = [...new Set([...st.excluded, id])];
-        st.pinned = st.pinned.filter(x => x !== id);
+        const next = excludeJob(st, ex.dataset.exclude);
+        st.pinned = next.pinned; st.excluded = next.excluded;
         Session.set(st);
         toast('제외하고 다시 생성합니다.');
         run({ regenerate: true });
@@ -623,7 +688,7 @@ function viewSchedule(id) {
   if (!sc) { app().innerHTML = `<div class="card empty"><div class="ic">🔍</div>스케줄을 찾을 수 없습니다.<br><br><a class="btn" href="#/my">내 스케줄로</a></div>`; return; }
 
   const legacy = !(sc.schemaVersion >= 2);
-  const profile = sc.profile;
+  const profile = safeProfile(sc.profile);
   let editing = false, dirty = false;
   const work = (sc.jobs || []).map(j => (legacy ? toViewJobLegacy(j) : toViewJob(j)));
 
@@ -730,11 +795,12 @@ function viewMy() {
     <div style="height:16px"></div>
     ${list.length ? list.map(s => {
       const legacy = !(s.schemaVersion >= 2);
+      const sp = safeProfile(s.profile);
       const jobs = (s.jobs || []).map(j => (legacy ? toViewJobLegacy(j) : toViewJob(j)));
-      const issues = validateCombo(jobs, s.profile);
-      const money = legacy ? fmtWon(comboMetrics(jobs, s.profile).monthly) : fmtMoney((s.metrics || {}).monthlyIncome);
+      const issues = validateCombo(jobs, sp);
+      const money = legacy ? fmtWon(comboMetrics(jobs, sp).monthly) : fmtMoney((s.metrics || {}).monthlyIncome);
       const sub = legacy
-        ? (() => { const m = comboMetrics(jobs, s.profile); return `목표 ${Math.round(m.rate * 100)}% · 주 ${m.workHours.toFixed(1)}h`; })()
+        ? (() => { const m = comboMetrics(jobs, sp); return `목표 ${Math.round(m.rate * 100)}% · 주 ${m.workHours.toFixed(1)}h`; })()
         : (() => { const m = s.metrics || {}; return `목표 ${fmtRate(m.targetAchievementRate)} · 주 ${m.weeklyWorkHours == null ? '—' : m.weeklyWorkHours.toFixed(1) + 'h'}`; })();
       return `
       <a class="card saved-item" href="#/schedule/${s.id}">
@@ -834,6 +900,15 @@ function localWeekly(jobs) {
 const fmtMoney = v => (typeof v === 'number' && Number.isFinite(v) ? fmtWon(v) : '—');
 const fmtRate = v => (typeof v === 'number' && Number.isFinite(v) ? Math.round(v * 100) + '%' : '—');
 
+const SOURCE_LABEL = { fallback: '서버 규칙 계산', llm: 'LLM' };
+
+/* 서버가 스스로 밝힌 한계(이동시간 추정 방식 · 주휴수당 미포함 등)를 그대로 보여준다. */
+function disclosureBlock(list) {
+  if (!Array.isArray(list) || !list.length) return '';
+  return `<details class="disclosures"><summary>서버가 밝힌 계산 전제 ${list.length}건</summary>
+    <ul>${list.map(d => `<li>${esc(d)}</li>`).join('')}</ul></details>`;
+}
+
 function syntheticNotice() {
   return `<div class="note warn synth-note" role="note">
     <b>합성 데모 데이터</b> · 실제 채용 공고가 아니며, 지원이나 예약이 확정되지 않습니다. 연락처·링크도 데모용입니다.
@@ -891,9 +966,12 @@ function buildDayTimeline(jobs, profile, day) {
   return blocks;
 }
 
+/* 편도 이동(분). 서버가 legMinutes(출발지 도보까지 합친 door-to-door)를 주면 그 값을
+ * 쓰고, 없을 때만 대중교통+도보를 더한다. 어느 쪽도 없으면 null — 지어내지 않는다. */
 function shiftTravelMinutes(shift) {
   const t = shift && shift.travel;
   if (!t) return null;
+  if (typeof t.legMinutes === 'number') return t.legMinutes;
   const transit = typeof t.transitMinutes === 'number' ? t.transitMinutes : null;
   const walk = typeof t.walkMinutes === 'number' ? t.walkMinutes : null;
   if (transit === null && walk === null) return null;
@@ -944,8 +1022,11 @@ function jobItem(j, profile, opts = {}) {
   const travelText = serverMin != null
     ? `<b>${serverMin}분</b>${firstTravel && firstTravel.fromLocation ? ` (${esc(firstTravel.fromLocation)} 출발${firstTravel.departAt ? ' · ' + esc(firstTravel.departAt) + ' 출발 권장' : ''})` : ''}`
     : `<b>${travelMin(profile && profile.home, j.location)}분</b> (추정 · 집 ${esc(profile && profile.home || '')} 기준)`;
-  const hours = typeof j.weeklyHours === 'number' ? j.weeklyHours : localWeekly([j]).hours;
-  const payValue = typeof j.weeklyPay === 'number' ? j.weeklyPay : (j.hourlyWage == null ? null : localWeekly([j]).pay);
+  // 주 근무시간은 배정 시간의 합이라 화면에서 더해도 같은 값이지만, 서버 값이 없을 때는
+  // 그 사실을 * 로 밝힌다. 주급은 서버가 계산하는 지표이므로 대신 곱하지 않는다.
+  const serverHours = typeof j.weeklyHours === 'number';
+  const hours = serverHours ? j.weeklyHours : localWeekly([j]).hours;
+  const payValue = typeof j.weeklyPay === 'number' ? j.weeklyPay : null;
   const c = j.contact;
   const editable = opts.controls === 'edit';
   return `<div class="job-item">
@@ -957,7 +1038,7 @@ function jobItem(j, profile, opts = {}) {
       <div class="js">
         <span>시급 <b>${j.hourlyWage == null ? '—' : j.hourlyWage.toLocaleString('ko-KR') + '원'}</b></span>
         <span>이동 ${travelText}</span>
-        <span>주 <b>${hours.toFixed(1)}h</b></span>
+        <span>주 <b>${hours.toFixed(1)}h${serverHours ? '' : '<span title="서버 값이 없어 배정 시간을 더한 값입니다">*</span>'}</b></span>
         <span>주급 <b>${fmtMoney(payValue)}</b></span>
         <span>최소 <b>${j.minWeeks == null ? '기간 미확인' : j.minWeeks + '주'}</b></span>
       </div>
@@ -996,5 +1077,10 @@ function closeModal() { const m = $('#modalbg'); if (m) m.remove(); }
 
 /* Node 테스트에서 렌더 함수만 떼어 쓰기 위한 내보내기 (브라우저에서는 무시) */
 if (typeof module === 'object' && module.exports) {
-  module.exports = { toViewJob, toViewJobLegacy, toStorageJob, localWeekly, renderTimetable, jobItem, warningBlock, metricsRowServer, slotsCard, buildDayTimeline, syntheticNotice };
+  module.exports = {
+    toViewJob, toViewJobLegacy, toStorageJob, localWeekly, renderTimetable, jobItem,
+    warningBlock, metricsRowServer, slotsCard, buildDayTimeline, syntheticNotice,
+    disclosureBlock, shiftTravelMinutes, safeProfile,
+    regeneratePayload, togglePin, excludeJob, mergeSeenPlanIds, MAX_SEEN_PLAN_IDS,
+  };
 }

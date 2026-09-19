@@ -29,6 +29,8 @@
   const VALID_PRIORITIES = new Set(['wage', 'distance', 'rating', 'flexibility']);
   const VALID_PLAN_TYPES = new Set(['maxIncome', 'minTravel', 'balanced']);
 
+  const DAY_KO = { MON: '월', TUE: '화', WED: '수', THU: '목', FRI: '금', SAT: '토', SUN: '일' };
+
   /* 화면에서 쓰던 우선순위 키 → 계약 enum */
   const PRIORITY_MAP = { wage: 'wage', distance: 'distance', rating: 'rating', flex: 'flexibility', flexibility: 'flexibility' };
 
@@ -53,10 +55,16 @@
   const arr = v => (Array.isArray(v) ? v : []);
 
   const HHMM = /^([01]?\d|2[0-4]):([0-5]\d)$/;
+  /**
+   * "9:00" → "09:00". 범위를 벗어난 값은 고쳐 주지 않고 null 을 돌려준다.
+   * 24시는 하루의 끝(24:00)만 뜻이 있다. 24:01~24:59 는 시각이 아니므로 거부한다.
+   */
   function normTime(v) {
     const m = HHMM.exec(str(v).trim());
     if (!m) return null;
-    return String(m[1]).padStart(2, '0') + ':' + m[2];
+    const hh = String(m[1]).padStart(2, '0');
+    if (hh === '24' && m[2] !== '00') return null;
+    return hh + ':' + m[2];
   }
   function toMinutes(hhmm) {
     const t = normTime(hhmm);
@@ -79,14 +87,19 @@
     const s = isObj(search) ? search : {};
     const sched = isObj(p.schedule) ? p.schedule : {};
 
+    // 켜져 있는 행은 값이 잘못돼 있어도 빼지 않는다. 조용히 빼면 제약이 사라진
+    // 요청이 나가고, 사용자는 지키지 못할 시간표를 받는다. 시각을 읽을 수 없으면
+    // null 로 남겨 validateRequest 가 요일까지 짚어 막게 한다.
     const fixedSchedules = [];
     for (const day of DAY_ORDER) {
       const row = sched[day];
       if (!isObj(row) || !row.has) continue;
-      const start = normTime(row.start);
-      const end = normTime(row.end);
-      if (!start || !end) continue;                 // 미입력 행은 보내지 않는다
-      fixedSchedules.push({ day, start, end, endLocation: str(row.place) });
+      fixedSchedules.push({
+        day,
+        start: normTime(row.start),
+        end: normTime(row.end),
+        endLocation: str(row.place),
+      });
     }
 
     const minBlockHours = VALID_MIN_BLOCK.includes(Number(p.minBlock)) ? Number(p.minBlock) : 2;
@@ -149,14 +162,17 @@
         problems.push({ code: 'VALIDATION_ERROR', field: 'fixedSchedules', message: '고정 일정 요일이 올바르지 않습니다.' });
         continue;
       }
-      if (seen.has(f.day)) problems.push({ code: 'SCHEDULE_CONFLICT', field: 'fixedSchedules', message: '같은 요일에 고정 일정이 두 번 있습니다.' });
+      const ko = DAY_KO[f.day];
+      if (seen.has(f.day)) problems.push({ code: 'SCHEDULE_CONFLICT', field: 'fixedSchedules', day: f.day, message: `${ko}요일에 고정 일정이 두 번 있습니다.` });
       seen.add(f.day);
       const st = toMinutes(f.start), en = toMinutes(f.end);
-      if (st === null || en === null || en <= st) {
-        problems.push({ code: 'VALIDATION_ERROR', field: 'fixedSchedules', message: '고정 일정의 종료 시간이 시작보다 빠릅니다.' });
+      if (st === null || en === null) {
+        problems.push({ code: 'VALIDATION_ERROR', field: 'fixedSchedules', day: f.day, message: `${ko}요일 고정 일정의 시작·종료 시간을 00:00~24:00 형식으로 입력해 주세요.` });
+      } else if (en <= st) {
+        problems.push({ code: 'VALIDATION_ERROR', field: 'fixedSchedules', day: f.day, message: `${ko}요일 고정 일정의 종료 시간이 시작보다 빠릅니다.` });
       }
       if (!f.endLocation) {
-        problems.push({ code: 'VALIDATION_ERROR', field: 'fixedSchedules', message: '고정 일정이 끝나는 장소를 선택해 주세요.' });
+        problems.push({ code: 'VALIDATION_ERROR', field: 'fixedSchedules', day: f.day, message: `${ko}요일 고정 일정이 끝나는 장소를 선택해 주세요.` });
       }
     }
 
@@ -183,17 +199,23 @@
       fromLocation: str(raw.fromLocation) || null,
       transitMinutes: num(raw.transitMinutes),
       walkMinutes: num(raw.walkMinutes),
+      // 서버가 door-to-door 편도를 직접 계산해 주면(출발지 도보 포함) 그 값이 정답이다.
+      originWalkMinutes: num(raw.originWalkMinutes),
+      legMinutes: num(raw.legMinutes),
+      slackMinutes: num(raw.slackMinutes),
       bufferMinutes: num(raw.bufferMinutes),
       departAt: normTime(raw.departAt),
     };
   }
 
+  /** 근무 한 칸. 하나라도 읽을 수 없으면 null — 호출부가 그 안을 통째로 버린다. */
   function adaptShift(raw) {
     if (!isObj(raw)) return null;
     const day = str(raw.day).toUpperCase();
     const start = normTime(raw.start);
     const end = normTime(raw.end);
     if (!VALID_DAYS.has(day) || !start || !end) return null;
+    if (toMinutes(end) <= toMinutes(start)) return null;
     return { day, start, end, travel: adaptTravel(raw.travel) };
   }
 
@@ -208,11 +230,19 @@
     };
   }
 
+  /**
+   * 공고 한 건. 배정 근무가 하나라도 깨져 있으면 null 을 돌려준다.
+   * 깨진 칸만 빼고 그리면 화면의 시간표와 서버가 값을 매긴 시간표가 달라지는데,
+   * 지표(monthlyIncome 등)는 서버 값 그대로 남으므로 "이 시간표로 이 돈"이라는
+   * 거짓말이 된다. 그래서 부분 폐기 대신 안 전체를 버린다.
+   */
   function adaptJob(raw) {
     if (!isObj(raw)) return null;
     const jobId = str(raw.jobId);
     if (!jobId) return null;
-    const assignedShifts = arr(raw.assignedShifts).map(adaptShift).filter(Boolean);
+    const rawShifts = arr(raw.assignedShifts);
+    const assignedShifts = rawShifts.map(adaptShift);
+    if (!rawShifts.length || assignedShifts.some(s => s === null)) return null;
     return {
       jobId,
       pinned: raw.pinned === true,
@@ -233,6 +263,12 @@
       minWeeks: num(raw.minWeeks),
       benefits: arr(raw.benefits).filter(b => typeof b === 'string' && b),
       assignedShifts,
+      holidayPay: isObj(raw.holidayPay) ? {
+        includedInIncome: bool(raw.holidayPay.includedInIncome),
+        employerHoursThresholdMet: bool(raw.holidayPay.employerHoursThresholdMet),
+        postingClaimsWeeklyHolidayPay: bool(raw.holidayPay.postingClaimsWeeklyHolidayPay),
+      } : null,
+      unverifiedQualifications: arr(raw.unverifiedQualifications).filter(q => typeof q === 'string' && q),
       weeklyHours: num(raw.weeklyHours),
       weeklyPay: num(raw.weeklyPay),
     };
@@ -261,11 +297,15 @@
   function adaptPlan(raw) {
     if (!isObj(raw)) return null;
     const id = str(raw.id);
-    const jobs = arr(raw.jobs).map(adaptJob).filter(Boolean);
-    if (!id || !jobs.length) return null;
+    const rawJobs = arr(raw.jobs);
+    const jobs = rawJobs.map(adaptJob);
+    // 공고 한 건이라도 읽을 수 없으면 이 안은 쓰지 않는다. metrics 는 그 공고까지
+    // 합쳐 계산된 값이라, 빠진 채로 그리면 지표와 시간표가 어긋난다.
+    if (!id || !rawJobs.length || jobs.some(j => j === null)) return null;
     const type = str(raw.type);
     return {
       id,
+      hash: str(raw.hash) || null,
       type: VALID_PLAN_TYPES.has(type) ? type : 'balanced',
       label: str(raw.label) || '추천안',
       reason: str(raw.reason),
@@ -305,16 +345,20 @@
         details: { receivedPlans: raw.plans.length },
       });
     }
-    const source = raw.source === 'fallback' ? 'fallback' : 'llm';
+    // source 는 서버만 안다. 없으면 null 로 두고 화면이 "미상"으로 밝힌다.
+    const source = raw.source === 'fallback' || raw.source === 'llm' ? raw.source : null;
+    const meta = isObj(raw.meta) ? raw.meta : null;
     return {
       requestId: str(raw.requestId) || null,
       generatedAt: str(raw.generatedAt) || null,
       source,
+      contractVersion: meta ? str(meta.contractVersion) || null : null,
+      disclosures: meta ? arr(meta.disclosures).filter(d => typeof d === 'string' && d) : [],
       availableSlots: arr(raw.availableSlots).map(adaptSlot).filter(Boolean),
       candidateCount: num(raw.candidateCount),
       plans,
       droppedPlans,
-      meta: isObj(raw.meta) ? raw.meta : null,
+      meta,
     };
   }
 
@@ -331,6 +375,9 @@
     NETWORK: { title: '서버에 연결하지 못했습니다.', retryable: true },
     MALFORMED_RESPONSE: { title: '서버 응답 형식이 올바르지 않습니다.', retryable: true },
     SERVER_ERROR: { title: '서버에서 오류가 발생했습니다.', retryable: true },
+    // web_demo.py 가 실제로 내려보내는 503 두 가지. 둘 다 조건을 바꿀 필요는 없다.
+    BUSY: { title: '앞선 추천을 아직 처리 중입니다.', retryable: true },
+    DAYTONA_UNAVAILABLE: { title: '실행 환경(Daytona)에 연결하지 못했습니다.', retryable: true },
   };
 
   /**
@@ -383,31 +430,44 @@
     const endpoint = opts.endpoint || ENDPOINT;
     const timeoutMs = opts.timeoutMs ?? TIMEOUT_MS;
     const controller = typeof AbortController === 'function' ? new AbortController() : null;
-    const timer = controller ? setTimeout(() => controller.abort(), timeoutMs) : null;
+    // 30초는 "응답 헤더까지"가 아니라 "본문을 다 읽을 때까지"다. 헤더만 오고 본문이
+    // 끊기는 경우가 실제로 있으므로 타이머는 res.json() 이 끝난 뒤에 해제한다.
+    let timedOut = false;
+    const timer = controller ? setTimeout(() => { timedOut = true; controller.abort(); }, timeoutMs) : null;
 
-    let res;
+    const clientTimeout = () => new ApiClientError('CLIENT_TIMEOUT', ERROR_TEXT.CLIENT_TIMEOUT.title, { retryable: true });
+
     try {
-      res = await fetchImpl(endpoint, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json; charset=utf-8' },
-        body: JSON.stringify(request),
-        signal: controller ? controller.signal : undefined,
-      });
-    } catch (cause) {
-      throw adaptError({ cause });
+      let res;
+      try {
+        res = await fetchImpl(endpoint, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json; charset=utf-8' },
+          body: JSON.stringify(request),
+          signal: controller ? controller.signal : undefined,
+        });
+      } catch (cause) {
+        throw timedOut ? clientTimeout() : adaptError({ cause });
+      }
+
+      let body = null;
+      try {
+        body = await res.json();
+      } catch (cause) {
+        if (timedOut || isAbort(cause)) throw clientTimeout();
+        body = null;                              // 본문이 JSON 이 아니면 상태 코드로만 판단한다
+      }
+
+      if (!res.ok) throw adaptError({ status: res.status, body });
+      return adaptResponse(body);
     } finally {
       if (timer) clearTimeout(timer);
     }
+  }
 
-    let body = null;
-    try {
-      body = await res.json();
-    } catch {
-      body = null;
-    }
-
-    if (!res.ok) throw adaptError({ status: res.status, body });
-    return adaptResponse(body);
+  function isAbort(e) {
+    const name = e && typeof e.name === 'string' ? e.name : '';
+    return name === 'AbortError' || name === 'TimeoutError';
   }
 
   /** 프로필·조건 → 요청 → 정규화된 응답. 실패 시 ApiClientError 를 던진다. */
@@ -424,10 +484,14 @@
     return { request, response };
   }
 
-  /** 이미 본 조합 id — 재생성 시 previousPlanHashes 로 보낸다. */
+  /**
+   * 이미 본 조합 — 재생성 시 previousPlanHashes 로 보낸다.
+   * 서버는 hash 와 plan id 를 둘 다 받지만, 같은 조합이 다른 이름표(수입 최대안 /
+   * 밸런스안)로 다시 오는 것까지 막으려면 조합 자체를 가리키는 hash 가 맞다.
+   */
   function planIds(response) {
     if (!isObj(response)) return [];
-    return arr(response.plans).map(p => str(p && p.id)).filter(Boolean);
+    return arr(response.plans).map(p => (isObj(p) ? str(p.hash) || str(p.id) : '')).filter(Boolean);
   }
 
   return {
@@ -442,6 +506,6 @@
     postRecommendations,
     requestRecommendations,
     planIds,
-    _internals: { normTime, adaptPlan, adaptJob, adaptShift, adaptSlot },
+    _internals: { normTime, toMinutes, adaptPlan, adaptJob, adaptShift, adaptSlot, adaptTravel },
   };
 });
