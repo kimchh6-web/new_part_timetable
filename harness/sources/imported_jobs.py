@@ -60,23 +60,33 @@ __all__ = [
     "DEFAULT_TTL_HOURS",
     "DEMO_WALK_MINUTES",
     "ENV_JOB_SOURCE",
+    "ENV_JOB_STORE_PATH",
     "ENV_PUBLIC_JOBS_PATH",
     "JOB_SOURCE_DEMO",
     "JOB_SOURCE_PUBLIC",
+    "JOB_SOURCE_STORE",
     "MAX_ARTIFACT_BYTES",
     "MAX_ROWS",
     "ImportedJobSource",
     "ImportedJobsError",
     "load_imported_jobs",
     "resolve_job_source",
+    "screen_rows",
 ]
 
 #: Server-controlled configuration. Read on the controller only.
 ENV_JOB_SOURCE = "HARNESS_JOB_SOURCE"
 ENV_PUBLIC_JOBS_PATH = "HARNESS_PUBLIC_JOBS_PATH"
+#: Absolute path of the persistent store read by ``job_store`` mode. A second
+#: variable on purpose: the artifact path and the database path are different
+#: things, and one must never be read as the other.
+ENV_JOB_STORE_PATH = "HARNESS_JOB_STORE_PATH"
 
 JOB_SOURCE_DEMO = "demo_json"
 JOB_SOURCE_PUBLIC = "public_web"
+#: Rows the operator already collected, kept across runs in the local store
+#: (:mod:`harness.storage`) and read back through :mod:`harness.sources.stored_jobs`.
+JOB_SOURCE_STORE = "job_store"
 
 #: The two honest shapes of real data, kept apart on purpose all the way to the
 #: badge: ``live`` is "this row was fetched from the provider", while
@@ -207,34 +217,104 @@ def resolve_job_source(env: dict[str, str] | None = None) -> dict[str, Any] | No
     """Read the server's job-source configuration.
 
     Returns ``None`` for the default demo dataset (nothing changes anywhere),
-    or ``{"job_source": "public_web", "path": ...}`` when the operator has
-    switched this server to the reviewed public artifact.
+    ``{"job_source": "public_web", "path": ...}`` when the operator has
+    switched this server to the reviewed public artifact, or
+    ``{"job_source": "job_store", "path": ...}`` when it reads the persistent
+    store instead. Every mode but the demo needs its **own** absolute path
+    variable, so a path configured for one mode can never be read by the other.
+
+    Three modes, one rule: an unset or misspelled configuration is refused, and
+    a refusal is never answered with the demo dataset.
     """
     environ = os.environ if env is None else env
     mode = (environ.get(ENV_JOB_SOURCE) or JOB_SOURCE_DEMO).strip()
     if mode in ("", JOB_SOURCE_DEMO):
         return None
-    if mode != JOB_SOURCE_PUBLIC:
+    if mode == JOB_SOURCE_PUBLIC:
+        variable = ENV_PUBLIC_JOBS_PATH
+        subject = "a local artifact"
+    elif mode == JOB_SOURCE_STORE:
+        variable = ENV_JOB_STORE_PATH
+        subject = "the persistent job store"
+    else:
         raise ImportedJobsError(
             "SOURCE_NOT_CONFIGURED",
-            f"unsupported job source mode (expected {JOB_SOURCE_DEMO} or {JOB_SOURCE_PUBLIC})",
+            "unsupported job source mode (expected "
+            f"{JOB_SOURCE_DEMO}, {JOB_SOURCE_PUBLIC} or {JOB_SOURCE_STORE})",
         )
-    path = (environ.get(ENV_PUBLIC_JOBS_PATH) or "").strip()
+    path = (environ.get(variable) or "").strip()
     if not path:
         raise ImportedJobsError(
             "SOURCE_NOT_CONFIGURED",
-            f"{JOB_SOURCE_PUBLIC} requires {ENV_PUBLIC_JOBS_PATH} to name a local artifact",
+            f"{mode} requires {variable} to name {subject}",
         )
     if not os.path.isabs(path):
         raise ImportedJobsError(
             "SOURCE_NOT_CONFIGURED",
-            f"{ENV_PUBLIC_JOBS_PATH} must be an absolute path",
+            f"{variable} must be an absolute path",
         )
-    return {"job_source": JOB_SOURCE_PUBLIC, "path": path}
+    return {"job_source": mode, "path": path}
 
 
 # ---------------------------------------------------------------------------
 # loading
+
+
+def screen_rows(
+    rows: Any,
+    *,
+    now: datetime | None = None,
+    ttl_hours: float = DEFAULT_TTL_HOURS,
+    declared_mode: str | None = None,
+) -> dict[str, Any]:
+    """Apply this module's eligibility rules to already-parsed rows.
+
+    This is the one place the rules live, so a second source (the persistent
+    store, :mod:`harness.sources.stored_jobs`) cannot drift into a looser
+    reading of "usable". It judges rows; it never reads a file, and it never
+    repairs one.
+
+    ``declared_mode`` is the artifact's single declared ``data_mode``. Pass
+    ``None`` for a source whose rows legitimately carry different modes: each
+    row is then judged against its own, which still has to be one of
+    :data:`DATA_MODES`.
+
+    Returns ``{"jobs", "rejected", "walk_estimated"}``. An empty ``jobs`` with
+    a populated ``rejected`` is a truthful outcome, and no caller may answer it
+    with the demo dataset.
+    """
+    moment = now if now is not None else datetime.now(timezone.utc)
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    horizon = timedelta(hours=float(ttl_hours))
+
+    accepted: list[dict[str, Any]] = []
+    rejected: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    estimated_walk = 0
+
+    for index, row in enumerate(rows):
+        label = row.get("id") if isinstance(row, dict) else None
+        label = label if isinstance(label, str) and label else f"#{index}"
+        mode = declared_mode
+        if mode is None and isinstance(row, dict):
+            provenance = row.get("provenance")
+            if isinstance(provenance, dict):
+                # Only to judge *this* row against its own claim; an
+                # unsupported value still fails below.
+                candidate = provenance.get("data_mode")
+                mode = candidate if candidate in DATA_MODES else None
+        reason = _reject_reason(row, moment, horizon, seen, mode)
+        if reason is not None:
+            rejected.append({"id": label, "reason": reason})
+            continue
+        clean = _clean_row(row)
+        if clean.get("walkMinutesEstimated"):
+            estimated_walk += 1
+        seen.add(clean["id"])
+        accepted.append(clean)
+
+    return {"jobs": accepted, "rejected": rejected, "walk_estimated": estimated_walk}
 
 
 def load_imported_jobs(
@@ -256,27 +336,14 @@ def load_imported_jobs(
     moment = now if now is not None else datetime.now(timezone.utc)
     if moment.tzinfo is None:
         moment = moment.replace(tzinfo=timezone.utc)
-    horizon = timedelta(hours=float(ttl_hours))
-
     declared_mode = str(source_meta["data_mode"])
     rows = document["jobs"]
-    accepted: list[dict[str, Any]] = []
-    rejected: list[dict[str, Any]] = []
-    seen: set[str] = set()
-    estimated_walk = 0
-
-    for index, row in enumerate(rows):
-        label = row.get("id") if isinstance(row, dict) else None
-        label = label if isinstance(label, str) and label else f"#{index}"
-        reason = _reject_reason(row, moment, horizon, seen, declared_mode)
-        if reason is not None:
-            rejected.append({"id": label, "reason": reason})
-            continue
-        clean = _clean_row(row)
-        if clean.get("walkMinutesEstimated"):
-            estimated_walk += 1
-        seen.add(clean["id"])
-        accepted.append(clean)
+    screened = screen_rows(
+        rows, now=moment, ttl_hours=ttl_hours, declared_mode=declared_mode
+    )
+    accepted = screened["jobs"]
+    rejected = screened["rejected"]
+    estimated_walk = screened["walk_estimated"]
 
     permission, permission_record = _permission(source_meta)
     meta = {
@@ -420,7 +487,7 @@ def _check_top_level(document: Any) -> None:
 
 
 def _reject_reason(
-    row: Any, now: datetime, horizon: timedelta, seen: set[str], declared_mode: str
+    row: Any, now: datetime, horizon: timedelta, seen: set[str], declared_mode: str | None
 ) -> str | None:
     if not isinstance(row, dict):
         return "NOT_AN_OBJECT"
@@ -441,9 +508,13 @@ def _reject_reason(
     mode = provenance.get("data_mode")
     if mode not in DATA_MODES:
         return "PROVENANCE_MODE_UNSUPPORTED"
-    if mode != declared_mode:
+    if declared_mode is not None and mode != declared_mode:
         # A row that claims a different mode than the artifact would make the
         # badge lie about half the plan. Reject rather than average the two.
+        # ``declared_mode=None`` is for a source that has no single declared
+        # mode to lie about (the store keeps each row's own): there the badge
+        # is derived from the accepted rows instead, and says 'mixed' when
+        # they disagree rather than picking one.
         return "PROVENANCE_MODE_MISMATCH"
     for field in ("provider", "source_url", "fetched_at"):
         if not isinstance(provenance.get(field), str) or not provenance[field].strip():

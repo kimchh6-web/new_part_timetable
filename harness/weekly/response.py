@@ -91,6 +91,25 @@ IMPORT_SOURCE_DISCLOSURE = (
     "이후의 마감·변경은 반영되지 않으므로 지원 전에 원문 공고를 확인하십시오."
 )
 
+#: Said when the rows came out of the operator's persistent job store. It
+#: names the one thing that is different from a freshly reviewed artifact:
+#: the rows were collected earlier and kept, and only those observed
+#: recruiting within the store's freshness window were used.
+STORED_SOURCE_DISCLOSURE = (
+    "공고 데이터는 운영자 서버의 공고 저장소에 쌓여 있던 실제 채용 공고 중, 최근 "
+    "24시간 안에 모집중으로 관측된 것만 사용했습니다. 합성 데모 데이터셋(600건)이 "
+    "아닙니다. 저장된 값은 수집 시점의 관측이므로 그 이후의 마감·변경은 반영되지 "
+    "않았습니다. 지원 전에 공고 원문을 다시 확인하세요."
+)
+
+#: Added to the above when the stored rows do not agree on one data mode:
+#: the badge must not describe an authorized import as a live fetch, or the
+#: other way round, just because they arrived in the same snapshot.
+STORED_MIXED_MODE_DISCLOSURE = (
+    "이 응답의 공고들은 수집 경로가 섞여 있습니다(직접 수집한 것과 권한을 받아 "
+    "제공받은 것). 한 가지로 묶어 말하지 않고 섞였다고 그대로 밝힙니다."
+)
+
 UNKNOWN_SOURCE_DISCLOSURE = (
     "공고 데이터의 출처를 서버가 밝히지 않았습니다. 실제 공고인지 데모 데이터인지 "
     "이 응답만으로는 단정할 수 없습니다."
@@ -164,13 +183,23 @@ def source_disclosures(job_source: str, data_mode: str) -> list[str]:
     if job_source == "demo_json" and data_mode in ("demo", "unknown"):
         return [DATASET_DISCLOSURE, QUALIFICATION_DISCLOSURE]
     if job_source == "public_web" and data_mode == "live":
-        head = LIVE_SOURCE_DISCLOSURE
+        head = [LIVE_SOURCE_DISCLOSURE]
     elif job_source == "public_web" and data_mode == "authorized_import":
-        head = IMPORT_SOURCE_DISCLOSURE
+        head = [IMPORT_SOURCE_DISCLOSURE]
+    elif job_source == "job_store" and data_mode in ("live", "authorized_import", "mixed"):
+        # Rows kept in the operator's store. The sentence about *where they
+        # came from* is still the one that matches each row's own data mode,
+        # and a snapshot carrying both says so rather than choosing.
+        head = [STORED_SOURCE_DISCLOSURE]
+        if data_mode == "live":
+            head.append(LIVE_SOURCE_DISCLOSURE)
+        elif data_mode == "authorized_import":
+            head.append(IMPORT_SOURCE_DISCLOSURE)
+        else:
+            head.append(STORED_MIXED_MODE_DISCLOSURE)
     else:
         return [UNKNOWN_SOURCE_DISCLOSURE, QUALIFICATION_DISCLOSURE]
-    return [
-        head,
+    return head + [
         IMPORTED_TRAVEL_DISCLOSURE,
         IMPORTED_PROJECTION_DISCLOSURE,
         IMPORTED_DEADLINE_DISCLOSURE,

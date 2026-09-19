@@ -75,16 +75,55 @@ with JobStore() as store:                      # .runtime/jobs.sqlite3
 * 행에는 이 저장소가 아는 것만 담은 `store` 블록(`first_seen`/`last_seen`/
   `observations`)이 붙는다. 제공자가 게시한 값이 아니라 저장소가 아는 값이다.
 
-### importer 로 자동 승격되지 않는다
+### importer 의 판정을 건너뛰지 않는다
 
-이 스냅샷은 **자동으로 운영 importer 에 들어가지 않는다.** 현재 importer
+스냅샷은 **운영자가 명시적으로 켰을 때만** 추천 경로로 들어가고(§3.1), 들어갈 때도
+importer 의 판정을 그대로 통과해야 한다. 현재 importer
 (`harness/sources/imported_jobs.py`)가 받는 것은 `www.alba.co.kr` 과
 `www.albamon.com` 의 HTTPS 공고 경로뿐이다(`ALLOWED_SOURCE_PATHS`). 고용24(work24)
 같은 API 출처를 승격하려면 스키마·증거 검토를 거쳐야 하고, **그것을 건너뛰는
-플래그는 없다.** 이 레인은 저장과 스냅샷까지이고, 활성화는 별도 판단이다.
+플래그는 없다** — 저장소에 들어 있다는 사실 자체는 승격 근거가 아니다.
 
 > 2026-09-20 기준 고용24 API 키는 아직 없다. 어댑터와 저장소는 오프라인 합성
 > 봉투로 독립 검증돼 있고, 라이브 전환은 이번 작업에 포함되지 않는다.
+
+## 3.1 저장소를 추천에 쓰기 (`job_source=job_store`, 기본 꺼짐)
+
+`harness/sources/stored_jobs.py` 가 이 저장소를 주간 추천의 공고 출처로 읽는다.
+**기본값은 그대로 데모 600건**이고, 켜려면 환경변수 두 개가 모두 필요하다.
+
+| 변수 | 값 | 뜻 |
+|---|---|---|
+| `HARNESS_JOB_SOURCE` | `job_store` | 이 저장소를 읽는다 |
+| `HARNESS_JOB_STORE_PATH` | **절대 경로** | 읽을 `.sqlite3` 파일 |
+
+경로만 설정하고 모드를 바꾸지 않으면 아무 일도 일어나지 않는다. 모드만 바꾸고
+경로가 없거나 상대경로면 `SOURCE_NOT_CONFIGURED` 로 거부한다. `public_web` 의
+아티팩트 경로(`HARNESS_PUBLIC_JOBS_PATH`)는 이 모드에서 **읽지 않는다** — 변수가
+따로인 이유가 그것이다.
+
+규칙 넷:
+
+1. **먹이는 `snapshot(max_age_hours=24)` 하나뿐이다.** 원시 테이블을 직접 읽지
+   않고, 이 창을 넓히는 플래그도 없다. 그래서 지워졌거나 닫혔거나 멈췄거나
+   만료됐거나 사라졌거나 `unknown` 이거나 24시간 넘게 관측되지 않은 공고는 추천
+   계획에 **애초에 공급되지 않는다**.
+2. **스냅샷을 통과한 행도 importer 의 판정을 다시 받는다.** 시급·명시된 요일
+   근무·지원 지역·검토된 HTTPS 호스트를 재검사하고, `scheduling_eligible=false`
+   이거나 구조화된 shift 가 없는 행은 후보가 되지 못한다. 일정은 **추론하지 않는다**.
+3. **잘못 설정된 저장소는 데모로 되돌아가지 않는다.** 파일이 없거나 DB 가 아니거나
+   읽을 수 없으면 코드만 담긴 `SOURCE_UNREADABLE` 오류이고(경로·행 내용 없음),
+   읽히지만 쓸 수 있는 행이 하나도 없으면 `public_web` 과 같은 모양의
+   `NO_CANDIDATES` 거부다(`reason: NO_ELIGIBLE_STORED_JOBS`). 없는 경로를 가리켜도
+   **빈 DB 를 만들지 않는다.**
+4. **응답이 출처를 증명한다.** `meta.job_source = "job_store"`, `meta.data_mode` 는
+   받아들인 행들이 합의한 값이거나 `mixed`, `meta.source_counts` 는 `stored`(저장된
+   수) / `fresh_recruiting`(스냅샷이 보여준 수) / `accepted`(편성 가능한 수)를
+   섞지 않고 따로 센다. 공지문도 데모 문구가 아니라 저장소 문구로 바뀐다.
+
+선택된 행은 기존 주입 경로 그대로 Daytona 샌드박스로 전송되고, 계획은 거기서
+세운다. 일간(`run_harness`) 경로는 `public_web` 과 마찬가지로 데모 데이터셋
+그대로이며, 저장소를 직접 쓰려면 `StoredJobSource` 를 `source=` 로 넘긴다.
 
 ## 4. 정규화된 입력의 경계
 
@@ -218,6 +257,11 @@ unsafe_path: harness/fixtures is the canonical dataset and is never written here
 ## 7. 테스트
 
 `tests/test_job_store.py` — 48개, 네트워크 없음, 전부 임시 디렉터리에서 돈다.
+`tests/test_stored_source_runtime.py` — 42개, 저장소를 추천 경로로 읽는 seam(§3.1):
+기본값이 움직이지 않음, 옵트인이 신선한 모집중 행을 싣고 옴, 명시 삭제·removal
+통지·`unknown`·오래된 행이 다음 로드에서 사라짐, 편성 불가 행(고용24 포함)이
+후보가 되지 못함, 잘못된 경로가 데모로 되돌아가지 않고 닫힘, 응답 메타가
+`job_store` 임을 증명.
 재시작 후 지속성, 중복 upsert, 오래된 관측이 되살리지도 신선도를 갱신하지도 못함,
 `closed`/`paused`/`expired`/`gone` 물리 삭제, `unknown` 은 숨기되 보존, 실패·부분
 가져오기가 아무것도 지우지 않음, 완료된 전체 동기화만 부재 행을 지움, 봉투 removal

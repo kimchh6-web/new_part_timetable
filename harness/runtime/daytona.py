@@ -414,21 +414,22 @@ class DaytonaScheduleExecutionRuntime:
 
         The default (``HARNESS_JOB_SOURCE`` unset or ``demo_json``) returns
         ``(None, None)`` so the sandbox loads the canonical 600-row dataset
-        exactly as before. With ``public_web`` the reviewed local artifact is
-        loaded and validated **here**, and only rows that survived validation
-        travel to the sandbox.
+        exactly as before. With ``public_web`` the reviewed local artifact, and
+        with ``job_store`` the operator's persistent store, is read and
+        validated **here**, and only rows that survived validation travel to
+        the sandbox.
 
         Two refusals, never a silent swap to the demo dataset:
 
-        * an unusable artifact is a transport-level
+        * an unusable artifact or store is a transport-level
           :class:`DaytonaRuntimeError` whose message names a code and nothing
           about the host — no path, no environment, no secret;
-        * an artifact whose rows are all ineligible is the domain's own
+        * a source whose rows are all ineligible is the domain's own
           ``NO_CANDIDATES``, with the rejection tally attached.
         """
         from ..sources.imported_jobs import (
             ImportedJobsError,
-            load_imported_jobs,
+            JOB_SOURCE_STORE,
             resolve_job_source,
         )
 
@@ -441,8 +442,23 @@ class DaytonaScheduleExecutionRuntime:
         if config is None:
             return None, None
 
+        if config["job_source"] == JOB_SOURCE_STORE:
+            rows, source, refusal = self._stored_rows(config["path"])
+        else:
+            rows, source, refusal = self._imported_rows(config["path"])
+
+        if not rows:
+            from ..weekly import WeeklyValidationError
+
+            raise WeeklyValidationError("NO_CANDIDATES", refusal[0], details=refusal[1])
+        return rows, source
+
+    def _imported_rows(self, path):
+        """The reviewed local artifact: rows, provenance, and its refusal text."""
+        from ..sources.imported_jobs import ImportedJobsError, load_imported_jobs
+
         try:
-            loaded = load_imported_jobs(config["path"])
+            loaded = load_imported_jobs(path)
         except ImportedJobsError as exc:
             raise DaytonaRuntimeError(
                 f"public job artifact unusable ({exc.code})"
@@ -471,21 +487,69 @@ class DaytonaScheduleExecutionRuntime:
             "ttl_hours": meta["ttl_hours"],
             "walk_estimated": meta["walk_estimated"],
         }
+        refusal = (
+            "가져온 공개 공고 중 이번 일정에 쓸 수 있는 공고가 없습니다.",
+            {
+                "reason": "NO_ELIGIBLE_IMPORTED_JOBS",
+                "jobSource": meta["job_source"],
+                "dataMode": meta["data_mode"],
+                "sourceCounts": counts,
+            },
+        )
+        return loaded["jobs"], source, refusal
 
-        if not loaded["jobs"]:
-            from ..weekly import WeeklyValidationError
+    def _stored_rows(self, path):
+        """The persistent store: rows, provenance, and its refusal text.
 
-            raise WeeklyValidationError(
-                "NO_CANDIDATES",
-                "가져온 공개 공고 중 이번 일정에 쓸 수 있는 공고가 없습니다.",
-                details={
-                    "reason": "NO_ELIGIBLE_IMPORTED_JOBS",
-                    "jobSource": meta["job_source"],
-                    "dataMode": meta["data_mode"],
-                    "sourceCounts": counts,
-                },
+        The rows come from ``JobStore.snapshot(max_age_hours=24)`` and nothing
+        else, so a posting that was deleted, closed, paused, expired, gone,
+        seen only as ``unknown`` or simply not observed recently is already
+        absent — and is then re-checked for scheduling eligibility like any
+        imported row. An unreadable store is a transport error here, never a
+        quiet return to the demo dataset.
+        """
+        from ..sources.imported_jobs import ImportedJobsError
+        from ..sources.stored_jobs import load_stored_jobs
+
+        try:
+            loaded = load_stored_jobs(path)
+        except ImportedJobsError as exc:
+            raise DaytonaRuntimeError(f"job store unusable ({exc.code})") from None
+
+        meta = loaded["meta"]
+        counts = {
+            key: meta[key]
+            for key in (
+                "stored",
+                "fresh_recruiting",
+                "received",
+                "accepted",
+                "rejected",
+                "walk_estimated",
+                "max_age_hours",
             )
-        return loaded["jobs"], source
+        }
+        counts["excluded"] = dict(meta["excluded"])
+        counts["rejection_reasons"] = dict(meta["rejection_reasons"])
+        counts["collectors"] = dict(meta["collectors"])
+        counts["providers"] = list(meta["providers"])
+        source = {
+            "job_source": meta["job_source"],
+            "data_mode": meta["data_mode"],
+            "source_counts": counts,
+            "ttl_hours": meta["max_age_hours"],
+            "walk_estimated": meta["walk_estimated"],
+        }
+        refusal = (
+            "저장소에 있는 공고 중 이번 일정에 쓸 수 있는 공고가 없습니다.",
+            {
+                "reason": "NO_ELIGIBLE_STORED_JOBS",
+                "jobSource": meta["job_source"],
+                "dataMode": meta["data_mode"],
+                "sourceCounts": counts,
+            },
+        )
+        return loaded["jobs"], source, refusal
 
     @staticmethod
     def _weekly_result(payload: dict, meta: dict[str, Any]) -> dict:
