@@ -1,0 +1,25 @@
+{
+  "profile": {
+    "role": "직장인",
+    "home": "사당",
+    "fixedSchedules": [
+      { "day": "MON", "start": "09:00", "end": "18:00", "endLocation": "강남역" },
+      { "day": "TUE", "start": "09:00", "end": "18:00", "endLocation": "강남역" },
+      { "day": "WED", "start": "09:00", "end": "18:00", "endLocation": "강남역" },
+      { "day": "THU", "start": "09:00", "end": "18:00", "endLocation": "강남역" },
+      { "day": "FRI", "start": "09:00", "end": "18:00", "endLocation": "강남역" }
+    ],
+    "constraints": {
+      "minBlockHours": 2,
+      "allowNight": false,
+      "wantWeeklyHolidayPay": false,
+      "age": 26
+    },
+    "targetAmount": 600000
+  },
+  "search": {
+    "jobCount": 2,
+    "categories": ["카페·음식점", "사무보조"],
+    "priority": "wage"
+  }
+}
