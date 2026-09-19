@@ -15,22 +15,28 @@ Existing sms/coach/toolshed tunnel configuration was not changed.
 
 A named tunnel keeps the hostname stable; it does not move the Python app into
 Cloudflare Workers or keep this PC awake. The PC, app and connector must stay on.
-No automatic boot task or Windows service was installed. A remote always-on app
-deployment is separate work.
+Two current-user Windows scheduled tasks now supervise the app and tunnel,
+independently of Codex/terminal sessions. They start at user logon and restart
+exited child processes after five seconds. Task Scheduler also retries a failed
+supervisor. This is not a boot service: the user must remain logged in, and PC
+sleep, shutdown or loss of Internet still makes the site unavailable.
 
 ## Restart on this PC
 
-From the repository root, start the app in one terminal:
+Install/start the existing tasks from the repository root:
 
 ```powershell
-$env:HARNESS_PUBLIC_ORIGIN = 'https://timetable.shinick.dev'
-python web_demo.py
+pwsh -NoProfile -File scripts/install-public-tasks.ps1
+Get-ScheduledTask -TaskName 'SchedulerHarness-*' | Select-Object TaskName, State
 ```
 
-Or use `실행.bat`, which now supplies that origin by default.
-The server needs DAYTONA_API_KEY in its process environment.
+Task names are `SchedulerHarness-web` and `SchedulerHarness-tunnel`. The
+supervisor reads DAYTONA_API_KEY from the Windows user environment and sets the
+public origin. Logs are in ignored `.runtime/supervisor-web.log` and
+`.runtime/supervisor-tunnel.log`. Do not launch a second app via `실행.bat` while
+these tasks are running.
 
-In another terminal, reuse the saved named-tunnel config:
+For manual tunnel diagnostics only (stop its task first), use the saved config:
 
 ```powershell
 cloudflared tunnel --config .runtime/named-tunnel.yml --no-autoupdate run 7dc7e040-792d-42f8-8bb3-8236b3a12e54
@@ -44,3 +50,9 @@ Do not create a new tunnel or overwrite DNS when restarting.
 Verified at setup: public page HTTP 200, public recommendation POST HTTP 200,
 runtime_provider=daytona, execution_ok=true, 600 jobs processed; named connector
 registered four edge connections. This is a point-in-time check, not an uptime guarantee.
+
+Recovery checked on 2026-09-19: terminating only this app's Python process led
+to a replacement process in 5.3 seconds; terminating only this app's connector
+restored public HTTP 200 within 10.6 seconds. A subsequent public recommendation
+returned HTTP 200, actual Daytona execution, 600 loaded jobs and three timeline
+blocks (5.4 seconds). Neither test restarted the supervisor manually.
