@@ -42,6 +42,8 @@ Daytona 실패는 503이며 로컬 추천으로 위장하지 않는다.
 - availableSlots: `{day,from,to,fromLocation}[]`, 서버가 계산한 빈 시간.
 - plans: 서로 다른 조합 1~3개. 각 안은 요청한 jobCount를 충족한다.
 - plan: `id`, `type`(maxIncome/minTravel/balanced), `label`, `reason`, `metrics`, `jobs`, `warnings`.
+  `fitScore`(0~1 number)는 LLM 단계가 붙을 때만 오는 선택 필드다. 없으면 없는 것이고,
+  화면은 이 값을 지어내지 않는다.
 - jobs: `jobId`, `pinned`, `title`, `company`, `platform`, `category`, `location`,
   `address`, `hourlyWage`, `rating`, `reviewCount`, `thumbnail`, `descriptionSnippet`,
   `sourceUrl`, `contact`, `assignedShifts`, `weeklyHours`, `weeklyPay`,
@@ -64,8 +66,10 @@ Daytona 실패는 503이며 로컬 추천으로 위장하지 않는다.
 | LLM 성공(검증 통과) | `llm` | `hybrid` | `true` | `success` |
 | 결정론적 대체 | `fallback` | `deterministic` | `false` | 아래 사유 중 하나 |
 
-성공일 때만 함께 싣는다: `meta.llmProvider`(`nosana` \| `openai`; 현재 구현·검증된 것은
-Nosana 하나다), `meta.llmModel`(모델 식별자 문자열), `meta.llmLatencyMs`(0 이상의 정수).
+`meta.llmProvider`(`nosana` \| `openai`; 현재 구현·검증된 것은 Nosana 하나다)와
+`meta.llmModel`(모델 식별자 문자열)은 **성공일 때만** 싣는다.
+`meta.llmLatencyMs`(0 이상의 정수)는 **두 경우 모두** 싣는다 — 대체된 경우에도 실제로
+LLM 을 기다린 시간이며, 단계를 아예 건너뛰었으면 0 이다.
 
 `meta.llmStatus` 대체 사유:
 
@@ -79,8 +83,12 @@ Nosana 하나다), `meta.llmModel`(모델 식별자 문자열), `meta.llmLatency
 
 LLM 이 하는 일은 **결정론적 단계가 이미 만든 후보와 근거 중에서 적합도를 평가하고
 추천 사유 문장을 고르는 것**뿐이다. 자유 작문을 싣지 않고, 입력에 없는 자격·경력·스킬을
-추론하지 않으며, 근무 시간·이동 시간·수입 어느 숫자도 LLM 이 만들거나 바꾸지 않는다.
-`plans` 의 순서와 내용은 LLM 사용 여부와 무관하게 서버가 정한 그대로다.
+추론하지 않는다.
+
+LLM 단계가 바꿀 수 있는 것은 셋뿐이다: `plans` 의 **순서**, 각 안의 **`reason`**,
+그리고 선택 필드 **`fitScore`** 의 추가. 각 안의 `jobs`·`metrics`·`assignedShifts` —
+곧 어떤 공고를 언제 일하고 얼마를 버는가 — 는 결정론적 단계가 계산한 값 그대로이며
+LLM 이 만들거나 바꾸지 않는다. 브라우저는 서버가 돌려준 `plans` 순서를 그대로 그린다.
 
 화면(`js/app.js`)은 `source=llm` + `llmUsed=true` + `llmStatus=success` 가 모두 맞고
 `engine` 이 `deterministic` 이 아닐 때만 "AI가 평가했다"고 말한다. 하나라도 빠지거나
