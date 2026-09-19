@@ -14,7 +14,10 @@ Existing sms/coach/toolshed tunnel configuration was not changed.
 - Daytona: actual dataset loading and schedule planning execution.
 
 A named tunnel keeps the hostname stable; it does not move the Python app into
-Cloudflare Workers or keep this PC awake. The PC, app and connector must stay on.
+Cloudflare Workers or keep this PC awake. The PC, app and connector must stay on:
+the tasks run as the interactive user, so the site is up only while this PC is
+awake and this user is logged in. Locking the screen is fine; signing out,
+sleeping or shutting down is not.
 Two current-user Windows scheduled tasks now supervise the app and tunnel,
 independently of Codex/terminal sessions. Each supervisor restarts its exited
 child process after five seconds. Each task has two triggers: at user logon, and
@@ -34,6 +37,44 @@ in, and PC sleep, shutdown or loss of Internet still makes the site unavailable.
 If a task is *disabled* externally, it cannot restore itself — Task Scheduler
 will not run a disabled task, so re-running the installer below is the only fix.
 
+## How to start it (double-click)
+
+Use **`실행.vbs`**. `wscript.exe` is a GUI-subsystem host, so it has no console of
+its own; it starts the two scheduled tasks if they are not already running, waits
+up to 30 seconds for `http://127.0.0.1:5191/` to answer, and opens the browser.
+`실행.bat` now only hands off to that script and exits immediately, so it is safe
+to launch from a CMD window and then close the window — the server belongs to
+Task Scheduler, not to the window that started it.
+
+The launcher never starts a server itself. If a task is missing or disabled it
+says so in a dialog and points at the installer instead of quietly running a
+foreground app, because a foreground app would be a second listener on 5191 that
+dies with its window. It reuses the already registered tasks and never registers,
+reinstalls or re-points them.
+
+## No console windows, and no orphans
+
+Both supervisors start their child with an explicit
+`ProcessStartInfo { UseShellExecute = false; CreateNoWindow = true }` (see
+`scripts/public-process.ps1`) rather than PowerShell's native-command pipeline,
+which can let Windows give the child its own console. stdout and stderr are read
+asynchronously — neither pipe can fill up and deadlock the supervisor — and both
+are appended live to the component log, with stderr lines marked `[stderr]`.
+
+Each supervisor also owns a Windows **job object** with
+`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` and assigns every child to it. The job
+handle is deliberately non-inheritable, so the child never holds it open. When
+the supervisor exits for any reason — including a hard kill — the handle closes
+and Windows terminates whatever is still in the job.
+
+That job object fixes a verified lifecycle regression: on 2026-09-19
+`Stop-ScheduledTask` killed supervisor 66528 but left its python child 60824
+alive, holding 127.0.0.1:5191 with a dead stdout; the next one-minute trigger
+started python 69532, and the stale listener answered public requests with
+EOF/502. The orphan was removed by hand. `ChildProcess.Dispose` additionally
+terminates its own still-running child (only that process and its tree) so a
+failure between start and wait cannot leave one behind either.
+
 ## Restart on this PC
 
 Install/start/upgrade the tasks from the repository root. Run it from the same
@@ -52,11 +93,28 @@ Get-ScheduledTask -TaskName 'SchedulerHarness-*' | Select-Object TaskName, State
 Expect two triggers per task: a logon trigger, and a time trigger whose
 `Repetition.Interval` is `PT1M` with an empty (indefinite) `Repetition.Duration`.
 
-Offline check of the generated definition, no scheduled task touched:
+Offline check of the generated definition, the windowless startup path and the
+double-click entry point. No scheduled task is touched:
 
 ```powershell
 pwsh -NoProfile -File scripts/test-public-task-definition.ps1
 ```
+
+Focused check of the launcher itself. It runs innocuous temporary processes
+(`cmd.exe`, a `pwsh` console probe, `ping 127.0.0.1`) in a temp directory, never
+the app or the tunnel, and the only process it terminates is one it started:
+
+```powershell
+pwsh -NoProfile -File scripts/test-no-console-child.ps1
+```
+
+It verifies the child's exit code, that stdout and stderr are captured separately
+and reach the log, that the child reports no visible console window
+(`GetConsoleWindow`/`IsWindowVisible` from inside the child), that disposing a
+running child terminates it, and that killing a stand-in supervisor leaves no
+orphan. The last one is the 2026-09-19 regression. What it does *not* prove is
+that nothing flashes on screen — that is an on-screen observation, and only the
+operator can make it.
 
 Fault test after the upgrade (stops the live supervisor for up to a minute, so
 run it deliberately):
@@ -71,12 +129,32 @@ Get-ScheduledTask -TaskName 'SchedulerHarness-web' | Select-Object TaskName, Sta
 Task names are `SchedulerHarness-web` and `SchedulerHarness-tunnel`. The
 supervisor reads DAYTONA_API_KEY from the Windows user environment and sets the
 public origin. Logs are in ignored `.runtime/supervisor-web.log` and
-`.runtime/supervisor-tunnel.log`. Do not launch a second app via `실행.bat` while
-these tasks are running.
+`.runtime/supervisor-tunnel.log`. `실행.bat` and `실행.vbs` can no longer produce a
+second app: they only ever drive these tasks.
 
-For manual tunnel diagnostics only, use the saved config. Stopping the task is no
-longer enough — the one-minute trigger starts it again — so disable it first and
-re-enable it when finished:
+**To stop the server, disable before you stop.** `Stop-ScheduledTask` alone is
+not a stop — the one-minute trigger starts the task again within a minute:
+
+```powershell
+Disable-ScheduledTask -TaskName 'SchedulerHarness-web'
+Stop-ScheduledTask -TaskName 'SchedulerHarness-web'
+Disable-ScheduledTask -TaskName 'SchedulerHarness-tunnel'
+Stop-ScheduledTask -TaskName 'SchedulerHarness-tunnel'
+```
+
+Stopping the task ends the supervisor, and the job object takes its child down
+with it, so no python or cloudflared process is left holding the port. Re-enable
+and start to bring the site back:
+
+```powershell
+Enable-ScheduledTask -TaskName 'SchedulerHarness-web'
+Start-ScheduledTask  -TaskName 'SchedulerHarness-web'
+Enable-ScheduledTask -TaskName 'SchedulerHarness-tunnel'
+Start-ScheduledTask  -TaskName 'SchedulerHarness-tunnel'
+```
+
+For manual tunnel diagnostics only, use the saved config. Same order — disable
+first, re-enable when finished:
 
 ```powershell
 Disable-ScheduledTask -TaskName 'SchedulerHarness-tunnel'
@@ -108,3 +186,12 @@ blocks (5.4 seconds). Neither test restarted the supervisor manually.
 Not yet verified on the production tasks at the time of this change: the
 one-minute trigger upgrade and the `Stop-ScheduledTask` fault test above are run
 by the coordinator, not from this branch.
+
+Verified for the windowless change on 2026-09-19, off the production processes:
+all checks in `scripts/test-no-console-child.ps1` and
+`scripts/test-public-task-definition.ps1` pass, and the child console probe
+reported `console-handle=0 console-visible=False`. Not verified from this branch:
+that the live supervisors show no window on screen after the next restart, and
+that a real `Stop-ScheduledTask` leaves no python or cloudflared behind. The task
+definition itself is unchanged, so the running supervisors keep the old code
+until the coordinator restarts them.

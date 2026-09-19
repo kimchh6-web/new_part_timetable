@@ -1,6 +1,16 @@
 @echo off
 chcp 65001 >nul
 cd /d "%~dp0"
-if not defined HARNESS_PUBLIC_ORIGIN set "HARNESS_PUBLIC_ORIGIN=https://timetable.shinick.dev"
-start "" http://127.0.0.1:5191/#/live
-python web_demo.py
+rem This window is a launcher only. It hands off to the GUI-subsystem script and
+rem exits immediately, so the public server lives in the scheduled tasks and
+rem closing this window - or any window - cannot take the site down.
+set "LAUNCHER=%~dp0실행.vbs"
+if not exist "%LAUNCHER%" goto :missing
+start "" wscript.exe "%LAUNCHER%"
+exit /b 0
+
+:missing
+echo Launcher not found: %LAUNCHER%
+echo Run the GUI launcher directly, or see examples\PUBLIC_SERVER.md.
+pause
+exit /b 1
